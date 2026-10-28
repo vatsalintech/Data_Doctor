@@ -1,36 +1,72 @@
+"""Command-line demo for DataDoctor's reusable detectors."""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from pathlib import Path
+
 import pandas as pd
 
-df = pd.read_csv("data/demo_messy.csv")
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
-# 1. Basic information
-print("DATASET OVERVIEW")
-print("Shape:", df.shape)
-print("Columns:", df.columns.tolist())
+from data_doctor.detectors import (  # noqa: E402
+    dataset_vitals,
+    diagnose,
+    finding_rows,
+    prepare_data,
+)
 
-# 2. Data types
-print("\nCOLUMN DATA TYPES")
-print(df.dtypes)
+DEFAULT_FILE = PROJECT_ROOT / "data" / "Messy" / "telco_messy.csv"
+DEFAULT_TARGET = "Churn"
 
-# 3. Missing values, including whitespace-only cells
-print("\nMISSING VALUES")
-text_df = df.select_dtypes(include=["object", "string"])
-blank_cells = text_df.apply(
-    lambda col: col.astype("string").str.strip().eq("")
-).sum()
 
-missing = df.isna().sum().add(blank_cells, fill_value=0)
-print(missing[missing > 0].sort_values(ascending=False))
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Print DataDoctor findings for a classification CSV."
+    )
+    parser.add_argument(
+        "csv",
+        nargs="?",
+        type=Path,
+        default=DEFAULT_FILE,
+        help="CSV path (defaults to the messy telco demo).",
+    )
+    parser.add_argument(
+        "--target",
+        default=DEFAULT_TARGET,
+        help="Name of the classification target column.",
+    )
+    return parser.parse_args()
 
-# 4. Duplicate rows
-print("\nDUPLICATES")
-print("Exact duplicate rows:", df.duplicated().sum())
 
-# 5. Target distribution
-print("\nCHURN DISTRIBUTION")
-print(df["Churn"].value_counts(dropna=False))
-print("\nChurn proportions:")
-print(df["Churn"].value_counts(normalize=True, dropna=False).round(3))
+def main() -> None:
+    args = parse_args()
+    path = (
+        args.csv
+        if args.csv.is_absolute()
+        else (Path.cwd() / args.csv).resolve()
+    )
+    df = prepare_data(pd.read_csv(path))
 
-# 6. Numerical columns for later outlier analysis
-print("\nNUMERIC COLUMNS")
-print(df.select_dtypes(include="number").columns.tolist())
+    print("DATASET OVERVIEW")
+    print(pd.Series(dataset_vitals(df)).to_string())
+    print(f"selected_target       {args.target}")
+
+    findings = diagnose(df, args.target)
+    print("\nFINDINGS")
+    with pd.option_context(
+        "display.max_rows",
+        None,
+        "display.max_columns",
+        None,
+        "display.width",
+        180,
+    ):
+        print(finding_rows(findings).to_string(index=False))
+
+
+if __name__ == "__main__":
+    main()

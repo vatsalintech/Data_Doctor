@@ -22,3 +22,7 @@ env/
 # OS and editor files
 .DS_Store
 .idea/
+
+# Datasets
+data/Original/creditcard.csv
+data/Messy/creditcard_messy.csv

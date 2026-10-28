@@ -19,6 +19,7 @@ The unique part is the training history: baseline vs later runs, with a factual 
 - Never auto-clean. Show every applicable action. Apply only what the user selects.
 - Leakage and label checks are **warning signs**, not a general solver. Suspicious labels are flagged for review. Do not silently change labels.
 - One model: **Logistic Regression**. No model picker, no AutoML, no deep learning.
+- Feature relevance is available after training. Aggregate absolute Logistic Regression coefficients back to source columns, describe them as model influence rather than causation, and let the user explicitly drop selected columns.
 - Do not call an LLM to decide issues or write suggestions. Rules decide. Templates explain.
 - Streamlit is the UI, built after the prototype script works.
 - Stack: pandas, NumPy, scikit-learn, Streamlit.
@@ -27,11 +28,11 @@ The unique part is the training history: baseline vs later runs, with a factual 
 
 1. Upload a CSV and preview a few rows.
 2. Show basic dataset vitals immediately.
-3. User picks the target column. The full dashboard stays locked until then.
+3. User picks the target column from the column names, excluding columns that look like IDs. The full dashboard stays locked until then.
 4. Show dataset-level issues and one card per column, with only the actions that apply.
 5. User applies actions. The working data, vitals, and action log update immediately.
 6. User can download the working data at any time.
-7. User trains when they choose. Do not retrain after every click.
+7. User trains when they choose. Training receives the working table and the target they already picked. It does not ask for the target again. Do not retrain after every click.
 8. Each train is saved as a run. The app compares the latest run with the previous one.
 
 If the user changes the target, reset diagnosis, the action log, and training history. The same file with a different target is a different problem.
@@ -198,6 +199,8 @@ Actions: drop the suspicious column, drop the ID-like column, or keep it with a 
 - **Medium**: lots of missing values, severe imbalance, many duplicate rows, strong outliers in a numeric feature
 - **Low**: a few missing cells, mild outliers, a non-leaky ID, a rare but usable class
 
+Display severity consistently in both dataset and column cards: high is red, medium is yellow, low is blue, and no issue is green.
+
 ## Suggestion rulebook
 
 Start with these. Add a rule only after a real case is handled badly.
@@ -228,12 +231,14 @@ Warn or refuse when: the target has one class, the target has too many classes (
 
 ## UI
 
-One Streamlit page with four sections:
+Use a dashboard, not a step-by-step page.
 
-1. **Load** — upload, preview, target dropdown, vitals (rows, columns, missing, duplicates, memory is optional).
-2. **Diagnosis** — dataset issues plus column cards. Status, severity, evidence, why it matters.
-3. **Actions** — only applicable options, multi-select, short warning for risky actions such as dropping many rows.
-4. **Experiment** — train, metric table, confusion matrices, run history, between-run caption.
+- Top: upload/demo choice, vitals (rows, columns, missing, duplicates), then a collapsed **Preview data** expander showing 10 rows only when opened.
+- Main area: dataset-level issues in the top row, then a separated full-width four-column card grid below the controls. Order cards high, medium, low, then no issue. Every card keeps this order together: information, problems, severity, applicable actions. Applying an action refreshes/removes the affected card immediately.
+- Put a **Relevance score** toggle to the right of the Column analysis title. Disable it until the first training run. When enabled, show each feature's most recently trained model-influence percentage in parentheses beside its name in the column-card heading; the target has no feature score. Keep those scores unchanged and available after cleaning actions, including column drops, and replace them only after the model is trained again. Reset them when the source or target changes.
+- Right control panel: start it directly below the dataset selector, beside the vitals. It contains target selection, Logistic Regression training controls, a green **Training result** button, feature relevance, working-copy download/reset, and the action log. Keep **Training result** directly below Train and above Feature relevance; disable it until the first run.
+- Training result opens a dialog that stacks latest run results, confusion matrix, run history, and between-run facts/caption vertically in that order; do not place those titled sections beside each other. Keep Accuracy, Macro F1, and ROC-AUC beside each other within latest run results. Center the confusion-matrix table at a compact width.
+- Feature relevance opens a dialog with a non-zoomable 0–1 influence chart. Show every column label on the chart rather than allowing automatic label suppression. Show clickable green Current-column buttons and a separate Drop-columns area; one click moves a column between the lists without a dropdown. Save applies those drops to the working copy and main cards; Cancel applies nothing.
 
 Reference dashboards that show per-column mean and standard deviation are inspiration for the vitals and cards only. Do not copy them. An ID column must not be presented as a normal numeric feature.
 
@@ -248,14 +253,14 @@ Data_Doctor/
   data_doctor/
     detectors.py              # findings, not prose
     treatments.py             # one action at a time
-    experiment.py             # split, train, evaluate, save runs
     report.py                 # templates for suggestions and between-run text
   notebooks/
-    prototype.py               # vitals, then train-and-compare; messy file only
+    prototype.py               # demo runner only: load a CSV, pass the target name
+    model_training.py          # reusable train_model(df, target)
   data/
-    Telco-Customer-Churn.csv  # clean mixed demo; do not edit
-    demo_messy.csv             # same rows plus planted issues
-    make_demo_messy.py         # rebuilds demo_messy.csv; seed 42
+    Original/                  # source CSVs; never edit
+    Messy/                     # generated demo CSVs plus issue manifest
+    build_messy_datasets.py    # deterministic generator; seed 42
   requirements.txt
   README.md
 ```
@@ -266,9 +271,9 @@ Data_Doctor/
 
 Do not start with Streamlit.
 
-1. Pick two known classification datasets. Prefer one mostly numeric (for example the sklearn breast cancer set) and one mixed. The mixed set is the telco churn file. A mostly numeric set is not chosen yet.
-2. Make a messy copy of one dataset with planted issues: missing cells, duplicate rows, extreme outliers, a copied target column, an ID column, a few flipped labels, and a rarer class if needed. Write down what was planted. Done for the telco file; see Current status.
-3. In `notebooks/prototype.py`, compute dataset vitals and a per-column summary for `demo_messy.csv`.
+1. Use three classification demos: mixed Telco churn, mixed Adult income, and numeric credit-card fraud.
+2. Build deterministic messy copies with `python data/build_messy_datasets.py`; never edit `data/Original/`.
+3. Use `notebooks/prototype.py` as a detector runner that accepts a CSV path and target name.
 4. Implement detectors in this order: missing values, duplicates, class imbalance, outliers, suspicious labels, leakage warning signs. Test each on the clean file and the messy file before moving on.
 5. Build the minimum trainable pipeline and print accuracy, macro F1, and a confusion matrix.
 6. Apply one action (drop the ID column), save the changed CSV, train again, and compare.
@@ -290,30 +295,16 @@ Do not start with Streamlit.
 Not part of v1. Do not build these until the six v1 checks and the prototype script work.
 
 - **Stored as text.** Detect a column whose values are numbers but are stored as text, or dates stored as text, and offer a conversion the user can choose. Same idea for other types that show up the same way. Do not convert automatically.
-- The clean telco file is the example for the number case: `TotalCharges` is text there because 11 cells are blank, so a normal missing-value count stays at 0. Leave `demo_messy.csv` numeric so the v1 missing-value and outlier checks can see that column.
+- The clean telco file is the example for the number case: `TotalCharges` is text there because 11 cells are blank, so a normal missing-value count stays at 0. Leave `telco_messy.csv` numeric so the v1 missing-value and outlier checks can see that column.
 
 ## Current status
 
-Mixed demo is the IBM telco churn file. Target is `Churn` (`Yes` / `No`).
+Three immutable originals live in `data/Original/`: Telco churn (`Churn`), Adult income (`income`), and credit-card fraud (`Class`). Run `python data/build_messy_datasets.py` to create deterministic messy copies and `data/Messy/issue_manifest.json`. The manifest is the source of truth for original versus planted issues.
 
-- Clean file, never edit: `data/Telco-Customer-Churn.csv` (7,043 rows, 21 columns). `customerID` is already an ID column. About 27% of customers churn, so imbalance is already present. No rarer class was planted.
-- Messy copy: `data/demo_messy.csv` (7,138 rows, 23 columns). Rebuild with `python data/make_demo_messy.py` (seed 42).
+Checks are target-agnostic structured functions in `data_doctor/detectors.py`. `notebooks/prototype.py` is only a command-line demo runner. Training is intentionally separate in `notebooks/model_training.py` as `train_model(df, target)`; the UI imports it directly. No detector or training function may hardcode demo target or feature names.
 
-Planted on top of the clean file, then 95 copied rows were appended. Counts below are what is in `demo_messy.csv`:
+`app.py` is the one-page Streamlit v1 app. It keeps original data, a working copy, action log, and run history in session state. The user chooses the target before target-dependent diagnosis and trains only on demand.
 
-- Missing cells: `tenure` 352 (5%), `MonthlyCharges` 860 (12%), `TotalCharges` 578 (8%, including 11 blanks that were already in the clean file), `Contract` 713 (10%), `PaymentMethod` 427 (6%).
-- Mostly empty column: `promo_code`, missing on 6,425 rows (90%). Suggest dropping it.
-- Exact duplicate rows: 60 extra copies.
-- Same features, different label: 35 copied rows whose `Churn` was flipped. `ChurnCopy` was left equal to the original label, so those pairs differ only in `Churn`.
-- Outliers, IQR: `tenure` 25 rows set to 999, `MonthlyCharges` 25 rows set to 9999, `TotalCharges` 20 rows set to 999999.
-- Flipped labels that are not part of a duplicate pair: 40 rows.
-- Leakage column: `ChurnCopy` matches `Churn` on 7,103 of 7,138 rows.
-- ID column: `customerID`, unique on 98.7% of messy rows.
-
-`TotalCharges` stays numeric in `demo_messy.csv`. Type detection (numbers or dates stored as text) is on the Later list, not in v1.
-
-The prototype is `notebooks/prototype.py`, not a notebook. It works on `demo_messy.csv` only. `Telco-Customer-Churn.csv` stays the untouched original. Use it later as a quick check that a detector stays quiet on healthy data, not as a second dataset to clean or train.
-
-A mostly numeric dataset is not chosen yet. Next work is the prototype script on the messy file: vitals, per-column summary, drop one ID-like column, save the CSV, train before and after.
+Type detection for numbers or dates stored as text remains on the Later list.
 
 When a product decision changes, update this file in the same session so the next agent does not follow a stale rule.

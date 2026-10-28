@@ -13,4 +13,4 @@ Read `AGENTS.md` before changing scope, UX, or code. If this rule and `AGENTS.md
 - Keep original data immutable. Mutate a working copy. Row fixes apply to train only. Fit imputers and scalers on train only. Dropping a column applies to train and test.
 - Leakage and bad labels are warnings. Do not silently relabel.
 - The user is a beginner. Explain in plain language and do not add v1-out-of-scope features (SMOTE, extra models, AutoML, accounts, per-click undo).
-- Build `notebooks/prototype.py` before Streamlit. UI code must call `data_doctor/`, not reimplement detection or training.
+- Shared diagnosis/treatment/reporting lives in `data_doctor/`. Reusable training lives in `notebooks/model_training.py`. Streamlit imports these functions and does not reimplement them.

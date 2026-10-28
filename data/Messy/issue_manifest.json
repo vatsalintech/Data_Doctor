@@ -1,0 +1,225 @@
+{
+  "seed": 42,
+  "datasets": {
+    "telco_messy.csv": {
+      "source_file": "Original/Telco-Customer-Churn.csv",
+      "output_file": "Messy/telco_messy.csv",
+      "target": "Churn",
+      "id_column": "customerID",
+      "target_copy": "ChurnCopy",
+      "source_rows": 7043,
+      "source_exact_duplicate_extras": 0,
+      "planted": {
+        "missing_requested": {
+          "tenure": 352,
+          "MonthlyCharges": 845,
+          "TotalCharges": 563,
+          "Contract": 704,
+          "PaymentMethod": 423
+        },
+        "mostly_empty_column": "promo_code",
+        "outliers": {
+          "tenure": {
+            "rows": 25,
+            "value": 999
+          },
+          "MonthlyCharges": {
+            "rows": 25,
+            "value": 9999
+          },
+          "TotalCharges": {
+            "rows": 20,
+            "value": 999999
+          }
+        },
+        "exact_copies": 60,
+        "conflicting_label_copies": 35,
+        "noisy_label_flips": 40
+      },
+      "observed": {
+        "rows": 7138,
+        "columns": 23,
+        "missing_by_column": {
+          "tenure": 355,
+          "Contract": 712,
+          "PaymentMethod": 427,
+          "MonthlyCharges": 859,
+          "TotalCharges": 579,
+          "promo_code": 6422
+        },
+        "exact_duplicate_extras": 60,
+        "conflicting_label_groups": 35,
+        "target_counts": {
+          "No": 5201,
+          "Yes": 1937
+        },
+        "target_copy_match_count": 7063,
+        "target_copy_match_rate": 0.9894928551414962,
+        "id_unique_rate": 0.9866909498458952,
+        "iqr_outlier_counts": {
+          "tenure": 25,
+          "MonthlyCharges": 25,
+          "TotalCharges": 20
+        }
+      }
+    },
+    "adult_messy.csv": {
+      "source_file": "Original/adult.csv",
+      "output_file": "Messy/adult_messy.csv",
+      "target": "income",
+      "id_column": "record_id",
+      "target_copy": "income_copy",
+      "source_rows": 32561,
+      "source_exact_duplicate_extras": 24,
+      "source_question_mark_cells": {
+        "workclass": 1836,
+        "occupation": 1843,
+        "native.country": 583
+      },
+      "planted": {
+        "question_marks_converted_to_missing": true,
+        "missing_requested": {
+          "age": 1302,
+          "hours.per.week": 2279,
+          "education": 1954,
+          "marital.status": 2605
+        },
+        "mostly_empty_column": "review_code",
+        "outliers": {
+          "age": {
+            "rows": 80,
+            "value": 999
+          },
+          "hours.per.week": {
+            "rows": 80,
+            "value": 999
+          },
+          "capital.gain": {
+            "rows": 60,
+            "value": 9999999
+          }
+        },
+        "exact_copies": 100,
+        "conflicting_label_copies": 50,
+        "noisy_label_flips": 50,
+        "synthetic_id": "record_id"
+      },
+      "observed": {
+        "rows": 32711,
+        "columns": 18,
+        "missing_by_column": {
+          "age": 1304,
+          "workclass": 1845,
+          "education": 1962,
+          "marital.status": 2612,
+          "occupation": 1852,
+          "hours.per.week": 2284,
+          "native.country": 590,
+          "review_code": 29446
+        },
+        "exact_duplicate_extras": 111,
+        "conflicting_label_groups": 50,
+        "target_counts": {
+          "<=50K": 24794,
+          ">50K": 7917
+        },
+        "target_copy_match_count": 32611,
+        "target_copy_match_rate": 0.9969429243985204,
+        "id_unique_rate": 0.9946806884534255,
+        "iqr_outlier_counts": {
+          "age": 219,
+          "fnlwgt": 990,
+          "education.num": 1207,
+          "capital.gain": 2783,
+          "capital.loss": 1530,
+          "hours.per.week": 8438
+        }
+      }
+    },
+    "creditcard_messy.csv": {
+      "source_file": "Original/creditcard.csv",
+      "output_file": "Messy/creditcard_messy.csv",
+      "target": "Class",
+      "id_column": "transaction_id",
+      "target_copy": "ClassCopy",
+      "source_rows": 284807,
+      "source_exact_duplicate_extras": 1081,
+      "planted": {
+        "missing_requested": {
+          "V1": 5696,
+          "V14": 8544,
+          "Amount": 11392
+        },
+        "mostly_empty_column": "device_note",
+        "outliers": {
+          "Amount": {
+            "rows": 120,
+            "value": 9999999
+          },
+          "V1": {
+            "rows": 100,
+            "value": -999
+          },
+          "V14": {
+            "rows": 100,
+            "value": -999
+          }
+        },
+        "exact_copies": 200,
+        "conflicting_label_copies": 80,
+        "noisy_label_flips": 40,
+        "synthetic_id": "transaction_id"
+      },
+      "observed": {
+        "rows": 285087,
+        "columns": 34,
+        "missing_by_column": {
+          "V1": 5704,
+          "V14": 8548,
+          "Amount": 11400,
+          "device_note": 256579
+        },
+        "exact_duplicate_extras": 977,
+        "conflicting_label_groups": 82,
+        "target_counts": {
+          "0": 284475,
+          "1": 612
+        },
+        "target_copy_match_count": 284967,
+        "target_copy_match_rate": 0.999579075861053,
+        "id_unique_rate": 0.9952260187241088,
+        "iqr_outlier_counts": {
+          "V1": 7029,
+          "V2": 13539,
+          "V3": 3368,
+          "V4": 11150,
+          "V5": 12307,
+          "V6": 22992,
+          "V7": 8957,
+          "V8": 24160,
+          "V9": 8291,
+          "V10": 9504,
+          "V11": 781,
+          "V12": 15362,
+          "V13": 3370,
+          "V14": 13821,
+          "V15": 2897,
+          "V16": 8190,
+          "V17": 7428,
+          "V18": 7545,
+          "V19": 10212,
+          "V20": 27804,
+          "V21": 14512,
+          "V22": 1319,
+          "V23": 18565,
+          "V24": 4780,
+          "V25": 5369,
+          "V26": 5591,
+          "V27": 39188,
+          "V28": 30366,
+          "Amount": 30616
+        }
+      }
+    }
+  }
+}
