@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.compose import ColumnTransformer
 from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
@@ -19,20 +21,14 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
+from data_doctor.detectors import prepare_data
+from data_doctor.treatments import apply_actions_to_split
+
 Sampling = Optional[Literal["oversample", "undersample"]]
 
 
 def _prepare_table(df: pd.DataFrame) -> pd.DataFrame:
-    prepared = df.copy()
-    text_columns = prepared.select_dtypes(
-        include=["object", "string"]
-    ).columns
-    for column in text_columns:
-        stripped = prepared[column].astype("string").str.strip()
-        prepared[column] = prepared[column].mask(
-            stripped.isin({"", "?"}), pd.NA
-        )
-    return prepared
+    return prepare_data(df)
 
 
 def _validate(df: pd.DataFrame, target: str) -> None:
@@ -40,6 +36,8 @@ def _validate(df: pd.DataFrame, target: str) -> None:
         raise ValueError(f"Target column {target!r} was not found.")
     if len(df.columns) < 2:
         raise ValueError("At least one feature column is required.")
+    if len(df) < 10:
+        raise ValueError("At least 10 rows are required for training.")
     if df[target].dropna().nunique() < 2:
         raise ValueError("The target must contain at least two classes.")
     counts = df[target].dropna().value_counts()
@@ -47,6 +45,41 @@ def _validate(df: pd.DataFrame, target: str) -> None:
         raise ValueError(
             "Every target class needs at least two rows for splitting."
         )
+
+
+def _group_aware_split(
+    x: pd.DataFrame,
+    y: pd.Series,
+    *,
+    test_size: float,
+    seed: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
+    """Keep identical feature rows together while preserving class balance."""
+    groups = pd.util.hash_pandas_object(x, index=False)
+    group_table = pd.DataFrame({"group": groups, "target": y})
+    group_targets = group_table.groupby("group", sort=False)["target"].agg(
+        lambda values: values.mode(dropna=True).iloc[0]
+    )
+    group_counts = group_targets.value_counts()
+    if len(group_targets) < 2 or group_counts.min() < 2:
+        raise ValueError(
+            "There are not enough independent feature groups in every "
+            "class for a leakage-safe train/test split."
+        )
+    train_groups, test_groups = train_test_split(
+        group_targets.index.to_numpy(),
+        test_size=test_size,
+        random_state=seed,
+        stratify=group_targets.to_numpy(),
+    )
+    train_mask = groups.isin(train_groups)
+    test_mask = groups.isin(test_groups)
+    return (
+        x.loc[train_mask].copy(),
+        x.loc[test_mask].copy(),
+        y.loc[train_mask].copy(),
+        y.loc[test_mask].copy(),
+    )
 
 
 def _resample_training_rows(
@@ -87,103 +120,6 @@ def _resample_training_rows(
         x_train.loc[sampled_indices].reset_index(drop=True),
         y_train.loc[sampled_indices].reset_index(drop=True),
     )
-
-
-def _apply_actions_to_split(
-    x_train: pd.DataFrame,
-    x_test: pd.DataFrame,
-    y_train: pd.Series,
-    y_test: pd.Series,
-    target: str,
-    actions: list[dict[str, Any]],
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.Series, pd.Series]:
-    """Replay cleaning honestly: learned values use train rows only."""
-    x_train = x_train.copy()
-    x_test = x_test.copy()
-    y_train = y_train.copy()
-    y_test = y_test.copy()
-
-    for entry in actions:
-        action = entry["action"]
-        column = entry.get("column")
-        details = entry.get("details", {})
-
-        if action == "drop_column" and column in x_train.columns:
-            x_train = x_train.drop(columns=[column])
-            x_test = x_test.drop(columns=[column])
-        elif action == "drop_exact_duplicates":
-            train_table = x_train.copy()
-            train_table[target] = y_train
-            keep = ~train_table.duplicated()
-            x_train, y_train = x_train.loc[keep], y_train.loc[keep]
-        elif action == "drop_conflicting_rows":
-            features = x_train.columns.tolist()
-            train_table = x_train.copy()
-            train_table[target] = y_train
-            counts = train_table.groupby(
-                features, dropna=False
-            )[target].transform("nunique")
-            keep = counts <= 1
-            x_train, y_train = x_train.loc[keep], y_train.loc[keep]
-        elif action == "drop_rows_missing" and column in x_train.columns:
-            keep = x_train[column].notna()
-            x_train, y_train = x_train.loc[keep], y_train.loc[keep]
-        elif action in {
-            "impute_mean",
-            "impute_median",
-            "impute_mode",
-        } and column in x_train.columns:
-            if action == "impute_mean":
-                fill_value = x_train[column].mean()
-            elif action == "impute_median":
-                fill_value = x_train[column].median()
-            else:
-                modes = x_train[column].mode(dropna=True)
-                if modes.empty:
-                    continue
-                fill_value = modes.iloc[0]
-            x_train[column] = x_train[column].fillna(fill_value)
-            x_test[column] = x_test[column].fillna(fill_value)
-        elif action == "fill_constant" and column in x_train.columns:
-            fill_value = details.get("fill_value")
-            x_train[column] = x_train[column].fillna(fill_value)
-            x_test[column] = x_test[column].fillna(fill_value)
-        elif action in {"cap_outliers", "remove_outliers"}:
-            if column not in x_train.columns:
-                continue
-            values = x_train[column].dropna()
-            if values.nunique() <= 2:
-                continue
-            q1, q3 = values.quantile([0.25, 0.75])
-            iqr = q3 - q1
-            low, high = q1 - 1.5 * iqr, q3 + 1.5 * iqr
-            if action == "cap_outliers":
-                x_train[column] = x_train[column].clip(low, high)
-                x_test[column] = x_test[column].clip(low, high)
-            else:
-                keep = (
-                    x_train[column].between(low, high)
-                    | x_train[column].isna()
-                )
-                x_train, y_train = (
-                    x_train.loc[keep],
-                    y_train.loc[keep],
-                )
-        elif action == "group_rare_categories":
-            if column not in x_train.columns:
-                continue
-            shares = x_train[column].value_counts(
-                normalize=True, dropna=True
-            )
-            rare_values = shares[shares < 0.01].index
-            x_train[column] = x_train[column].where(
-                ~x_train[column].isin(rare_values), "Other"
-            )
-            x_test[column] = x_test[column].where(
-                ~x_test[column].isin(rare_values), "Other"
-            )
-
-    return x_train, x_test, y_train, y_test
 
 
 def _build_pipeline(
@@ -267,7 +203,6 @@ def _feature_relevance(
     """Aggregate absolute encoded coefficients back to source columns."""
     preprocessor = pipeline.named_steps["preprocessor"]
     model = pipeline.named_steps["model"]
-    feature_names = preprocessor.get_feature_names_out()
     coefficients = np.abs(model.coef_)
     encoded_relevance = (
         coefficients.mean(axis=0)
@@ -276,22 +211,21 @@ def _feature_relevance(
     )
 
     relevance = {column: 0.0 for column in source_columns}
-    longest_first = sorted(source_columns, key=len, reverse=True)
-    for encoded_name, importance in zip(
-        feature_names, encoded_relevance
-    ):
-        transformed_name = encoded_name.split("__", 1)[-1]
-        source = next(
-            (
-                column
-                for column in longest_first
-                if transformed_name == column
-                or transformed_name.startswith(f"{column}_")
-            ),
-            None,
-        )
-        if source is not None:
-            relevance[source] += float(importance)
+    for name, transformer, columns in preprocessor.transformers_:
+        if name == "remainder" or not columns:
+            continue
+        output_slice = preprocessor.output_indices_[name]
+        scores = encoded_relevance[output_slice]
+        if name == "numeric":
+            for column, score in zip(columns, scores):
+                relevance[column] += float(score)
+        elif name == "categorical":
+            encoder = transformer.named_steps["encoder"]
+            start = 0
+            for column, categories in zip(columns, encoder.categories_):
+                stop = start + len(categories)
+                relevance[column] += float(scores[start:stop].sum())
+                start = stop
 
     total = sum(relevance.values())
     if total > 0:
@@ -306,6 +240,50 @@ def _feature_relevance(
             reverse=True,
         )
     )
+
+
+def _slice_diagnostics(
+    x_test: pd.DataFrame,
+    y_test: pd.Series,
+    predictions: np.ndarray,
+) -> list[dict[str, Any]]:
+    """Return guarded per-group metrics for categorical test slices."""
+    minimum_support = max(10, int(np.ceil(len(x_test) * 0.05)))
+    rows: list[dict[str, Any]] = []
+    predicted = pd.Series(predictions, index=y_test.index)
+    categorical = x_test.select_dtypes(
+        include=["object", "string", "category", "bool"]
+    )
+    for column in categorical.columns:
+        if categorical[column].nunique(dropna=True) > 20:
+            continue
+        grouped_values = categorical[column].astype("string").fillna(
+            "(missing)"
+        )
+        for value, indices in grouped_values.groupby(
+            grouped_values
+        ).groups.items():
+            if len(indices) < minimum_support:
+                continue
+            truth = y_test.loc[indices]
+            guess = predicted.loc[indices]
+            rows.append(
+                {
+                    "column": column,
+                    "value": "(missing)" if pd.isna(value) else str(value),
+                    "support": int(len(indices)),
+                    "accuracy": float(accuracy_score(truth, guess)),
+                    "macro_f1": float(
+                        f1_score(
+                            truth,
+                            guess,
+                            average="macro",
+                            zero_division=0,
+                        )
+                    ),
+                }
+            )
+    return rows
 
 
 def train_model(
@@ -324,34 +302,12 @@ def train_model(
     is never mutated.
     """
     prepared = _prepare_table(df)
+    # Missing-like text in the target is a reviewable label, not an
+    # automatically missing value. Preserve it until a user action says
+    # otherwise. True null targets still cannot be evaluated.
+    if target in df.columns:
+        prepared[target] = df[target].copy()
     actions = actions or []
-    for entry in actions:
-        if entry["action"] == "recode_label":
-            details = entry.get("details", {})
-            prepared[target] = prepared[target].replace(
-                {details.get("old"): details.get("new")}
-            )
-        elif entry["action"] == "drop_weird_label_rows":
-            normalized = (
-                prepared[target]
-                .astype("string")
-                .str.strip()
-                .str.lower()
-            )
-            weird = normalized.isin(
-                {
-                    "",
-                    "?",
-                    "???",
-                    "-1",
-                    "na",
-                    "n/a",
-                    "none",
-                    "null",
-                    "unknown",
-                }
-            ) | prepared[target].isna()
-            prepared = prepared.loc[~weird].copy()
     _validate(prepared, target)
 
     missing_target_rows = int(prepared[target].isna().sum())
@@ -359,14 +315,12 @@ def train_model(
     x = usable.drop(columns=[target])
     y = usable[target]
 
-    x_train, x_test, y_train, y_test = train_test_split(
-        x,
-        y,
-        test_size=test_size,
-        random_state=seed,
-        stratify=y,
+    x_train, x_test, y_train, y_test = _group_aware_split(
+        x, y, test_size=test_size, seed=seed
     )
-    x_train, x_test, y_train, y_test = _apply_actions_to_split(
+    train_rows_before = len(x_train)
+    original_test_features = x_test.copy()
+    x_train, x_test, y_train, y_test = apply_actions_to_split(
         x_train,
         x_test,
         y_train,
@@ -374,17 +328,50 @@ def train_model(
         target,
         actions,
     )
-    train_rows_before = len(x_train)
+    if y_train.nunique() < 2:
+        raise ValueError(
+            "The selected training actions leave fewer than two target "
+            "classes in the training rows."
+        )
+    train_rows_after_cleaning = len(x_train)
     x_train, y_train = _resample_training_rows(
         x_train, y_train, sampling, seed
     )
+    train_rows_after_sampling = len(x_train)
 
     pipeline = _build_pipeline(
         x_train, class_weight=class_weight, seed=seed
     )
-    pipeline.fit(x_train, y_train)
+    training_warnings: list[str] = []
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always", ConvergenceWarning)
+        pipeline.fit(x_train, y_train)
+    if any(
+        issubclass(item.category, ConvergenceWarning) for item in caught
+    ):
+        training_warnings.append(
+            "The model reached its iteration limit; metrics may be unstable."
+        )
     predictions = pipeline.predict(x_test)
-    labels = pipeline.named_steps["model"].classes_
+    model_labels = pipeline.named_steps["model"].classes_
+    unseen_test_labels = sorted(
+        str(label)
+        for label in set(pd.unique(y_test)) - set(model_labels)
+    )
+    if unseen_test_labels:
+        training_warnings.append(
+            "The test set contains labels not present after training-row "
+            f"actions: {', '.join(unseen_test_labels)}."
+        )
+    labels = pd.unique(
+        pd.concat(
+            [
+                y_test.reset_index(drop=True),
+                pd.Series(predictions),
+            ],
+            ignore_index=True,
+        )
+    ).tolist()
     relevance = _feature_relevance(
         pipeline, x_train.columns.tolist()
     )
@@ -399,13 +386,15 @@ def train_model(
         ).tolist(),
         "labels": [str(label) for label in labels],
         "roc_auc": None,
+        "roc_auc_positive_class": None,
     }
-    if len(labels) == 2:
+    if len(labels) == 2 and len(model_labels) == 2:
         probabilities = pipeline.predict_proba(x_test)[:, 1]
-        binary_truth = (y_test == labels[1]).astype(int)
+        binary_truth = (y_test == model_labels[1]).astype(int)
         metrics["roc_auc"] = float(
             roc_auc_score(binary_truth, probabilities)
         )
+        metrics["roc_auc_positive_class"] = str(model_labels[1])
 
     return {
         "metrics": metrics,
@@ -416,13 +405,23 @@ def train_model(
         "class_weight": class_weight,
         "sampling": sampling,
         "train_rows_before": int(train_rows_before),
-        "train_rows_after": int(len(x_train)),
+        "train_rows_after": int(train_rows_after_sampling),
+        "train_rows_after_cleaning": int(train_rows_after_cleaning),
+        "train_rows_after_sampling": int(train_rows_after_sampling),
         "test_rows": int(len(x_test)),
+        "test_indices": x_test.index.tolist(),
         "missing_target_rows_excluded": missing_target_rows,
         "columns": x.columns.tolist(),
         "row_count": int(len(usable)),
         "column_count": int(len(x.columns)),
         "feature_relevance": relevance,
+        "warnings": training_warnings,
+        "unseen_test_labels": unseen_test_labels,
+        "slice_diagnostics": _slice_diagnostics(
+            original_test_features.loc[x_test.index],
+            y_test,
+            predictions,
+        ),
     }
 
 

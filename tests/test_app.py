@@ -10,7 +10,11 @@ def test_dashboard_starts_with_collapsed_preview_and_severity_order():
         str(ROOT / "app.py"), default_timeout=30
     ).run()
     assert not app.exception
-    assert [item.label for item in app.expander] == ["Preview data"]
+    assert [item.label for item in app.expander] == [
+        "Preview data",
+        "Pre-train readiness",
+        "Compare a new CSV",
+    ]
 
     headings = [item.value for item in app.markdown]
     assert headings.index("#### ChurnCopy") < headings.index(
@@ -76,6 +80,16 @@ def test_feature_column_moves_to_drop_list_with_one_click():
         and heading.value.endswith("%)")
         for heading in app.markdown
     )
+    result_button = next(
+        button
+        for button in app.button
+        if button.label == "Training result"
+    )
+    assert result_button.disabled
+    assert any(
+        "Results are out of date" in caption.value
+        for caption in app.caption
+    )
 
 
 def test_training_result_unlocks_and_opens_in_dialog():
@@ -116,4 +130,30 @@ def test_training_result_unlocks_and_opens_in_dialog():
         "Accuracy",
         "Macro F1",
     }
+
+
+def test_readiness_is_tentative_and_impact_preview_is_absent():
+    app = AppTest.from_file(
+        str(ROOT / "app.py"), default_timeout=30
+    ).run()
+    assert all(
+        button.label not in {"Preview", "Preview impact"}
+        for button in app.button
+    )
+    assert any(
+        "Checks passed so far" in message.value
+        for message in app.info
+    )
+    assert "impact_preview" not in app.session_state
+
+
+def test_upload_mode_explains_that_large_files_can_take_time():
+    app = AppTest.from_file(
+        str(ROOT / "app.py"), default_timeout=30
+    ).run()
+    app.radio[0].set_value("Upload CSV").run()
+    assert any(
+        "Large files can take a few minutes to train" in caption.value
+        for caption in app.caption
+    )
 

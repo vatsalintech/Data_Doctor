@@ -12,6 +12,11 @@ ID_UNIQUE_THRESHOLD = 0.95
 ID_MIN_UNIQUE_VALUES = 20
 RARE_CLASS_THRESHOLD = 0.01
 LEAKAGE_MATCH_THRESHOLD = 0.95
+SUSPICIOUS_PREDICTION_THRESHOLD = 0.98
+SUSPICIOUS_PREDICTION_UPLIFT = 0.20
+SUSPICIOUS_PREDICTION_MIN_COVERAGE = 0.80
+SUSPICIOUS_PREDICTION_MIN_GROUP_SIZE = 5
+SUSPICIOUS_PREDICTION_MAX_UNIQUE_RATE = 0.50
 MOSTLY_MISSING_THRESHOLD = 0.80
 MISSING_LABEL_TOKENS = {
     "",
@@ -107,6 +112,11 @@ def validate_classification_table(
         errors.append(
             "The selected target looks like an ID because almost every "
             "value is unique."
+        )
+    elif class_count > max(20, int(len(target_values) * 0.20)):
+        errors.append(
+            "The target has too many classes for a useful v1 "
+            "classification model."
         )
     if target_values.empty:
         errors.append("The target has no usable values.")
@@ -338,11 +348,13 @@ def suspicious_label_findings(
 
 def leakage_findings(df: pd.DataFrame, target: str) -> list[Finding]:
     findings: list[Finding] = []
+    usable_target_rows = int(df[target].notna().sum())
     for column in df.columns:
         if column == target:
             continue
         series = df[column]
-        if is_likely_id(series):
+        id_like = is_likely_id(series)
+        if id_like:
             unique_rate = float(
                 series.dropna().nunique() / len(series.dropna())
             )
@@ -370,7 +382,8 @@ def leakage_findings(df: pd.DataFrame, target: str) -> list[Finding]:
             column_codes, _ = pd.factorize(pair[column])
             target_codes, _ = pd.factorize(pair[target])
             reverse_rate = float((column_codes != target_codes).mean())
-        if max(match_rate, reverse_rate) >= LEAKAGE_MATCH_THRESHOLD:
+        direct_match_rate = max(match_rate, reverse_rate)
+        if direct_match_rate >= LEAKAGE_MATCH_THRESHOLD:
             findings.append(
                 Finding(
                     issue_type="target_copy",
@@ -378,11 +391,61 @@ def leakage_findings(df: pd.DataFrame, target: str) -> list[Finding]:
                     severity="high",
                     found=True,
                     evidence={
-                        "match_rate": max(match_rate, reverse_rate)
+                        "match_rate": direct_match_rate
                     },
                     suggested_action="drop_column",
                     reason=(
                         "This feature almost directly reveals the target."
+                    ),
+                )
+            )
+            continue
+
+        coverage = (
+            len(pair) / usable_target_rows if usable_target_rows else 0.0
+        )
+        unique_rate = pair[column].nunique() / len(pair)
+        if (
+            id_like
+            or coverage < SUSPICIOUS_PREDICTION_MIN_COVERAGE
+            or unique_rate > SUSPICIOUS_PREDICTION_MAX_UNIQUE_RATE
+        ):
+            continue
+        group_sizes = pair.groupby(column, dropna=False).size()
+        supported_values = group_sizes[
+            group_sizes >= SUSPICIOUS_PREDICTION_MIN_GROUP_SIZE
+        ].index
+        supported = pair[pair[column].isin(supported_values)]
+        if len(supported) / len(pair) < SUSPICIOUS_PREDICTION_MIN_COVERAGE:
+            continue
+        grouped = supported.groupby(
+            column, dropna=False
+        )[target].value_counts()
+        predictable_rows = int(grouped.groupby(level=0).max().sum())
+        prediction_rate = predictable_rows / len(supported)
+        baseline_rate = float(
+            supported[target].value_counts().max() / len(supported)
+        )
+        if (
+            prediction_rate >= SUSPICIOUS_PREDICTION_THRESHOLD
+            and prediction_rate - baseline_rate
+            >= SUSPICIOUS_PREDICTION_UPLIFT
+        ):
+            findings.append(
+                Finding(
+                    issue_type="suspicious_predictor",
+                    scope=column,
+                    severity="high",
+                    found=True,
+                    evidence={
+                        "prediction_rate": prediction_rate,
+                        "baseline_rate": baseline_rate,
+                        "coverage": coverage,
+                    },
+                    suggested_action="drop_column",
+                    reason=(
+                        "This feature almost perfectly maps to the target, "
+                        "which may indicate leakage."
                     ),
                 )
             )

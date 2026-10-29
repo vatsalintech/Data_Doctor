@@ -59,3 +59,45 @@ def test_prepare_data_recognizes_blank_and_question_mark():
     prepared = prepare_data(df)
     assert prepared["feature"].isna().sum() == 2
 
+
+def test_leakage_detector_flags_near_perfect_target_mapping():
+    labels = ["class-a", "class-b", "class-c"] * 40
+    mapped = {
+        "class-a": "north",
+        "class-b": "south",
+        "class-c": "west",
+    }
+    df = pd.DataFrame(
+        {
+            "region_code": [mapped[label] for label in labels],
+            "noise": list(range(len(labels))),
+            "outcome": labels,
+        }
+    )
+
+    findings = diagnose(df, "outcome")
+
+    assert any(
+        finding.issue_type == "suspicious_predictor"
+        and finding.scope == "region_code"
+        and finding.found
+        for finding in findings
+    )
+
+
+def test_leakage_detector_ignores_high_cardinality_noise():
+    rows = 100
+    df = pd.DataFrame(
+        {
+            "code": [f"group-{index // 2}" for index in range(rows)],
+            "feature": [index % 7 for index in range(rows)],
+            "outcome": ["yes", "no"] * (rows // 2),
+        }
+    )
+    findings = diagnose(df, "outcome")
+    assert not any(
+        finding.issue_type == "suspicious_predictor"
+        and finding.scope == "code"
+        for finding in findings
+    )
+

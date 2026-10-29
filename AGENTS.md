@@ -28,7 +28,7 @@ The unique part is the training history: baseline vs later runs, with a factual 
 
 1. Upload a CSV and preview a few rows.
 2. Show basic dataset vitals immediately.
-3. User picks the target column from the column names, excluding columns that look like IDs. The full dashboard stays locked until then.
+3. User picks the target column from the column names, excluding columns that look like IDs. For uploaded files, never select a target automatically. Show vitals and preview, but keep diagnosis, column analysis, and training locked until the user explicitly chooses.
 4. Show dataset-level issues and one card per column, with only the actions that apply.
 5. User applies actions. The working data, vitals, and action log update immediately.
 6. User can download the working data at any time.
@@ -120,7 +120,7 @@ Call this **Trainable raw**. Later runs are **Trainable raw + the extra cleaning
 
 1. Split first. Treat second.
 2. Fit anything learned from data (median, mode, scaler, encoder) on train only, then apply to test.
-3. Row operations (drop duplicates, drop outliers, resample) happen on the **train** split only.
+3. Row and label operations (drop duplicates, drop outliers, drop missing-like label rows, explicitly recode a label, resample) happen on the **train** split only.
 4. The test set stays as close as possible to the original test split.
 5. Dropping a column, including a leaky or ID column, happens on both train and test. Rows stay the same.
 6. Same model, same seed, same metrics every run.
@@ -133,7 +133,7 @@ Always show accuracy, macro F1, and a confusion matrix. Add ROC-AUC for binary t
 
 When classes are imbalanced, say that accuracy can look fine while macro F1 is poor.
 
-Also show train rows before vs after, columns dropped, and the between-run caption.
+Also show train rows before vs after cleaning, rows after optional sampling, columns dropped, and the between-run caption. Count train rows before immediately after the split, after cleaning before sampling, and after sampling separately. Between-run row interpretations use the after-cleaning count so oversampling is never described as row deletion.
 
 ## v1 checks and actions
 
@@ -171,7 +171,7 @@ Actions: keep and review, drop those rows, or recode a label only when the user 
 
 ### 6. Leakage warning signs
 
-Flag: target included again as a feature, a column identical or almost identical to the target, ID-like columns (almost every value unique), a feature that predicts the target too perfectly, duplicate rows that could land in both train and test.
+Flag: target included again as a feature, a column identical or almost identical to the target, ID-like columns (almost every value unique), a feature whose values map to the target with suspiciously near-perfect accuracy and meaningful lift over the majority-class baseline, duplicate rows that could land in both train and test.
 
 Actions: drop the suspicious column, drop the ID-like column, or keep it with a warning.
 
@@ -192,6 +192,8 @@ Actions: drop the suspicious column, drop the ID-like column, or keep it with a 
 **Leakage suspect**: high severity, drop recommended, or keep with a warning that the score may be fake.
 
 **Target column**: class counts, rare classes, weird labels. The user cannot drop the target. Actions are row/label actions only.
+
+For missing-like labels, expose both **Drop missing-like target rows** and an explicit **Recode a target label** control when there is a concrete stored label value to replace. Recode requires the user to choose the old value and enter the new value.
 
 ## Severity
 
@@ -244,13 +246,57 @@ Reference dashboards that show per-column mean and standard deviation are inspir
 
 Use Streamlit session state so the working copy, action log, and run history survive button clicks.
 
+After a working-data action, preserve run history but mark the latest result
+as stale. Disable result/relevance controls until the user trains again.
+Diagnosis failures must still leave target selection, working-data download,
+and reset controls available.
+
+## v1.1 hardening
+
+- Keep identical feature groups on one side of the deterministic split so
+  duplicates cannot leak between train and test.
+- A health-report JSON records the dataset fingerprint, target, findings,
+  actions, split seed, and run history.
+- An inferred dataset contract records expected columns, broad dtypes,
+  missingness ceilings, and bounded category sets. It is downloadable and can
+  validate a later CSV.
+- Uploaded CSVs are limited to 200 MB, 500,000 rows, and 250 columns. Column
+  cards are paginated. The uploader warns that large files can take a few
+  minutes to train.
+- Training warnings name unseen test labels, convergence problems, and the
+  positive class used for binary ROC-AUC.
+
+## v2 data intervention lab
+
+- **Slice diagnostics** report accuracy and macro F1 only for categorical test
+  groups with sufficient support. Present them as inspection signals, not
+  fairness or causal conclusions.
+- **Dataset comparison** validates a new CSV against the inferred contract and
+  reports schema, missingness, categorical-distribution, and numeric PSI drift
+  signals. It remains rule/statistics based.
+- These features do not change the one-model decision. No AutoML or model
+  marketplace is added.
+
 ## Code layout
 
 ```text
 Data_Doctor/
   AGENTS.md
-  app.py                      # Streamlit only, after the prototype script works
+  app.py                      # Minimal Streamlit entry point
+  streamlit_ui/
+    dashboard.py              # Top-level page composition
+    data_sources.py           # CSV loading and source selection
+    state.py                  # Session-state mutations
+    actions.py                # UI action choices and label input helpers
+    styles.py                 # Page setup, theme, and branding
+    components/
+      common.py               # Shared vitals, preview, and severity widgets
+      dataset_issues.py       # Dataset-wide issue cards
+      columns.py              # Column cards and pagination
+      dialogs.py              # Results and feature-relevance dialogs
+      controls.py             # Target, training, download, and recovery controls
   data_doctor/
+    contracts.py               # schema contracts and dataset drift
     detectors.py              # findings, not prose
     treatments.py             # one action at a time
     report.py                 # templates for suggestions and between-run text
@@ -265,7 +311,9 @@ Data_Doctor/
   README.md
 ```
 
-`app.py` calls the package. It does not contain the detection or training logic.
+`app.py` only launches `streamlit_ui`. Streamlit presentation is split by
+component inside that package. Diagnosis, treatment, reporting, and reusable
+training remain outside the UI package.
 
 ## Build order
 
@@ -303,7 +351,10 @@ Three immutable originals live in `data/Original/`: Telco churn (`Churn`), Adult
 
 Checks are target-agnostic structured functions in `data_doctor/detectors.py`. `notebooks/prototype.py` is only a command-line demo runner. Training is intentionally separate in `notebooks/model_training.py` as `train_model(df, target)`; the UI imports it directly. No detector or training function may hardcode demo target or feature names.
 
-`app.py` is the one-page Streamlit v1 app. It keeps original data, a working copy, action log, and run history in session state. The user chooses the target before target-dependent diagnosis and trains only on demand.
+`app.py` is the small entry point for the one-page Streamlit v1 app.
+`streamlit_ui/` owns its page composition and components. It keeps original
+data, a working copy, action log, and run history in session state. The user
+chooses the target before target-dependent diagnosis and trains only on demand.
 
 Type detection for numbers or dates stored as text remains on the Later list.
 

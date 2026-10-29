@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Any
 
 import pandas as pd
+
+from data_doctor.detectors import dataset_vitals, prepare_data
 
 
 def build_run_record(
@@ -19,10 +23,21 @@ def build_run_record(
         "accuracy": metrics["accuracy"],
         "macro_f1": metrics["macro_f1"],
         "roc_auc": metrics["roc_auc"],
+        "roc_auc_positive_class": metrics.get(
+            "roc_auc_positive_class"
+        ),
         "confusion_matrix": metrics["confusion_matrix"],
         "labels": metrics["labels"],
         "train_rows_before": training_result["train_rows_before"],
         "train_rows_after": training_result["train_rows_after"],
+        "train_rows_after_cleaning": training_result.get(
+            "train_rows_after_cleaning",
+            training_result["train_rows_after"],
+        ),
+        "train_rows_after_sampling": training_result.get(
+            "train_rows_after_sampling",
+            training_result["train_rows_after"],
+        ),
         "test_rows": training_result["test_rows"],
         "data_rows": int(len(df)),
         "columns": df.columns.tolist(),
@@ -32,6 +47,11 @@ def build_run_record(
         "action_log_position": int(action_log_position),
         "class_weight": training_result["class_weight"],
         "sampling": training_result["sampling"],
+        "warnings": training_result.get("warnings", []),
+        "slice_diagnostics": training_result.get(
+            "slice_diagnostics", []
+        ),
+        "test_indices": training_result.get("test_indices", []),
     }
 
 
@@ -58,12 +78,38 @@ def compare_runs(
         "columns_added": sorted(current_columns - previous_columns),
         "columns_removed": sorted(previous_columns - current_columns),
         "train_rows": {
-            "before": int(previous["train_rows_after"]),
-            "after": int(current["train_rows_after"]),
-            "change": int(
-                current["train_rows_after"]
-                - previous["train_rows_after"]
+            "before": int(
+                previous.get(
+                    "train_rows_after_cleaning",
+                    previous["train_rows_after"],
+                )
             ),
+            "after": int(
+                current.get(
+                    "train_rows_after_cleaning",
+                    current["train_rows_after"],
+                )
+            ),
+            "change": int(
+                current.get(
+                    "train_rows_after_cleaning",
+                    current["train_rows_after"],
+                )
+                - previous.get(
+                    "train_rows_after_cleaning",
+                    previous["train_rows_after"],
+                )
+            ),
+        },
+        "training_options": {
+            "class_weight": {
+                "before": previous.get("class_weight"),
+                "after": current.get("class_weight"),
+            },
+            "sampling": {
+                "before": previous.get("sampling"),
+                "after": current.get("sampling"),
+            },
         },
         "accuracy": _metric_change(
             previous["accuracy"], current["accuracy"]
@@ -117,7 +163,10 @@ def interpretation_caption(
             "Balanced class weights improved macro F1 while accuracy "
             "stayed about the same."
         )
-    if facts["train_rows"]["change"] < -0.10 * previous["train_rows_after"]:
+    previous_clean_rows = previous.get(
+        "train_rows_after_cleaning", previous["train_rows_after"]
+    )
+    if facts["train_rows"]["change"] < -0.10 * previous_clean_rows:
         if accuracy_change > 0.03:
             return (
                 "The score rose after many rows were removed; those rows "
@@ -131,4 +180,51 @@ def interpretation_caption(
     } & action_names and abs(accuracy_change) < 0.01:
         return "Missingness was probably not the main performance problem."
     return None
+
+
+def dataset_fingerprint(df: pd.DataFrame) -> str:
+    """Stable content fingerprint for report and run provenance."""
+    content_hash = pd.util.hash_pandas_object(
+        df, index=True
+    ).values.tobytes()
+    return hashlib.sha256(content_hash).hexdigest()
+
+
+def build_health_report(
+    df: pd.DataFrame,
+    target: str,
+    findings: list[Any],
+    action_log: list[dict[str, Any]],
+    run_history: list[dict[str, Any]],
+    *,
+    split_seed: int = 42,
+) -> dict[str, Any]:
+    """Build a portable, rule-based record of dataset readiness."""
+    finding_rows = [
+        finding.to_dict()
+        if hasattr(finding, "to_dict")
+        else dict(finding)
+        for finding in findings
+    ]
+    unresolved = [row for row in finding_rows if row.get("found")]
+    return {
+        "report_version": 1,
+        "dataset_fingerprint": dataset_fingerprint(df),
+        "target": target,
+        "split_seed": split_seed,
+        "vitals": dataset_vitals(prepare_data(df)),
+        "findings": finding_rows,
+        "unresolved_warnings": unresolved,
+        "actions": action_log,
+        "runs": run_history,
+    }
+
+
+def health_report_json(report: dict[str, Any]) -> bytes:
+    return json.dumps(
+        report,
+        indent=2,
+        default=str,
+        allow_nan=False,
+    ).encode("utf-8")
 

@@ -6,6 +6,8 @@ Logistic Regression runs. It never auto-cleans the uploaded table.
 
 ## Setup
 
+Use Python 3.9 through 3.13.
+
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
@@ -62,9 +64,21 @@ The app supports upload or demo selection, target selection, diagnosis,
 explicit treatments, working-copy download/reset, optional training-only
 balancing, saved runs, and between-run comparisons.
 
+It also provides:
+
+- leakage-safe, repeatable train/test splits that keep duplicate feature
+  groups together
+- action impact previews on the same frozen split
+- guarded per-group slice metrics
+- downloadable data-health reports and inferred dataset contracts
+- reference-versus-new CSV contract and drift checks
+
+Uploads are limited to 200 MB, 500,000 rows, and 250 columns so the local
+Streamlit session remains responsive.
+
 ## Test
 
 ```bash
-pytest
+python -m pytest
 ```
 
