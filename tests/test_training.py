@@ -29,11 +29,14 @@ def test_training_is_generic_and_deterministic():
         "roc_auc_positive_class",
     }
     assert first["row_count"] == len(df)
+    assert first["pipeline"].named_steps["model"].solver == "lbfgs"
     assert set(first["feature_relevance"]) == {
         "numeric",
         "category",
     }
     assert sum(first["feature_relevance"].values()) == pytest.approx(1.0)
+    assert first["bootstrap_metrics"] == second["bootstrap_metrics"]
+    assert len(first["bootstrap_metrics"]["accuracy"]) == 400
 
 
 def test_imputer_is_fit_on_training_rows_only():
@@ -185,4 +188,25 @@ def test_numeric_constant_replay_preserves_numeric_dtype():
 def test_roc_auc_names_its_positive_class():
     result = train_model(_demo_table(), "label")
     assert result["metrics"]["roc_auc_positive_class"] in {"yes", "no"}
+
+
+def test_explicit_date_conversion_remains_trainable():
+    df = _demo_table()
+    df["event_date"] = pd.date_range(
+        "2024-01-01",
+        periods=len(df),
+    ).astype(str)
+    result = train_model(
+        df,
+        "label",
+        actions=[
+            {
+                "action": "convert_to_datetime",
+                "column": "event_date",
+            }
+        ],
+    )
+    preprocessor = result["pipeline"].named_steps["preprocessor"]
+    assert "datetime" in preprocessor.named_transformers_
+    assert "event_date" in result["feature_relevance"]
 

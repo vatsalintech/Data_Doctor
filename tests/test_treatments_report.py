@@ -66,6 +66,49 @@ def test_fill_constant_keeps_numeric_type_in_action_log():
     assert log["details"]["fill_value"] == 7.5
 
 
+def test_stored_text_conversions_are_explicit_and_typed():
+    df = pd.DataFrame(
+        {
+            "amount": ["1.5", " ", "3.0"],
+            "event_date": ["2026-01-01", "2026-01-02", "2026-01-03"],
+            "label": ["a", "b", "a"],
+        }
+    )
+    numeric, numeric_log = apply_action(
+        df,
+        "label",
+        "convert_to_number",
+        column="amount",
+    )
+    dated, date_log = apply_action(
+        numeric,
+        "label",
+        "convert_to_datetime",
+        column="event_date",
+    )
+    assert numeric["amount"].dtype.kind == "f"
+    assert numeric["amount"].isna().sum() == 1
+    assert pd.api.types.is_datetime64_any_dtype(dated["event_date"])
+    assert numeric_log["details"]["converted_to"] == "number"
+    assert date_log["details"]["converted_to"] == "datetime"
+
+
+def test_numeric_text_conversion_rejects_infinity():
+    df = pd.DataFrame(
+        {
+            "amount": ["1.0", "2.0", "inf"],
+            "label": ["a", "b", "a"],
+        }
+    )
+    with pytest.raises(ValueError, match="infinity"):
+        apply_action(
+            df,
+            "label",
+            "convert_to_number",
+            column="amount",
+        )
+
+
 def test_run_comparison_reports_facts():
     previous = {
         "action_log_position": 0,
@@ -94,6 +137,47 @@ def test_run_comparison_reports_facts():
     assert comparison["columns_removed"] == ["id"]
     assert comparison["accuracy"]["change"] == pytest.approx(-0.01)
     assert comparison["actions"] == actions
+
+
+def test_run_comparison_labels_bootstrap_wobble_and_improvement():
+    base = {
+        "action_log_position": 0,
+        "columns": ["x"],
+        "train_rows_after": 80,
+        "accuracy": 0.812,
+        "macro_f1": 0.80,
+        "roc_auc": None,
+        "bootstrap_metrics": {
+            "accuracy": [0.80, 0.81, 0.82, 0.81],
+            "macro_f1": [0.79, 0.80, 0.81, 0.80],
+        },
+    }
+    within = {
+        **base,
+        "accuracy": 0.818,
+        "bootstrap_metrics": {
+            "accuracy": [0.805, 0.805, 0.825, 0.825],
+            "macro_f1": [0.795, 0.795, 0.815, 0.815],
+        },
+    }
+    clear = {
+        **within,
+        "accuracy": 0.86,
+        "bootstrap_metrics": {
+            "accuracy": [0.85, 0.86, 0.87, 0.86],
+            "macro_f1": [0.84, 0.85, 0.86, 0.85],
+        },
+    }
+    within_result = compare_runs(base, within, [])
+    clear_result = compare_runs(base, clear, [])
+    assert (
+        within_result["metric_wobble"]["accuracy"]["assessment"]
+        == "within_wobble"
+    )
+    assert (
+        clear_result["metric_wobble"]["accuracy"]["assessment"]
+        == "larger_than_wobble"
+    )
 
 
 def test_run_comparison_uses_cleaning_rows_not_oversampling_rows():

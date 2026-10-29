@@ -18,6 +18,7 @@ SUSPICIOUS_PREDICTION_MIN_COVERAGE = 0.80
 SUSPICIOUS_PREDICTION_MIN_GROUP_SIZE = 5
 SUSPICIOUS_PREDICTION_MAX_UNIQUE_RATE = 0.50
 MOSTLY_MISSING_THRESHOLD = 0.80
+STORED_TEXT_MIN_VALUES = 3
 MISSING_LABEL_TOKENS = {
     "",
     "?",
@@ -72,6 +73,8 @@ def dataset_vitals(df: pd.DataFrame) -> dict[str, Any]:
 
 
 def is_likely_id(series: pd.Series) -> bool:
+    if pd.api.types.is_datetime64_any_dtype(series.dtype):
+        return False
     non_missing = series.dropna()
     if len(non_missing) == 0:
         return False
@@ -161,6 +164,87 @@ def missing_findings(df: pd.DataFrame) -> list[Finding]:
                 reason=reason,
             )
         )
+    return findings
+
+
+def stored_as_text_findings(
+    df: pd.DataFrame,
+    target: str,
+) -> list[Finding]:
+    """Find feature columns whose non-missing text has one safer type."""
+    findings: list[Finding] = []
+    text_columns = df.select_dtypes(
+        include=["object", "string"]
+    ).columns
+    for column in text_columns:
+        if column == target:
+            continue
+        values = df[column].dropna().astype("string").str.strip()
+        if (
+            len(values) < STORED_TEXT_MIN_VALUES
+            or values.nunique() <= 2
+        ):
+            continue
+
+        numeric = pd.to_numeric(values, errors="coerce")
+        has_leading_zero_identifiers = values.str.match(
+            r"^[+-]?0\d+$"
+        ).any()
+        all_finite = bool(
+            numeric.notna().all()
+            and np.isfinite(numeric.to_numpy(dtype=float)).all()
+        )
+        if all_finite and not has_leading_zero_identifiers:
+            findings.append(
+                Finding(
+                    issue_type="stored_as_text",
+                    scope=column,
+                    severity="medium",
+                    found=True,
+                    evidence={
+                        "inferred_type": "number",
+                        "parseable_values": int(len(values)),
+                        "parseable_percent": 100.0,
+                    },
+                    suggested_action="convert_to_number",
+                    reason=(
+                        "Every non-missing value looks numeric, but the "
+                        "column is stored as text."
+                    ),
+                )
+            )
+            continue
+
+        looks_date_shaped = values.str.contains(
+            r"[-/:T]|[A-Za-z]{3,}",
+            regex=True,
+        )
+        if not looks_date_shaped.mean() >= 0.80:
+            continue
+        parsed_dates = pd.to_datetime(
+            values,
+            errors="coerce",
+            format="mixed",
+        )
+        if parsed_dates.notna().all():
+            findings.append(
+                Finding(
+                    issue_type="stored_as_text",
+                    scope=column,
+                    severity="medium",
+                    found=True,
+                    evidence={
+                        "inferred_type": "date",
+                        "parseable_values": int(len(values)),
+                        "parseable_percent": 100.0,
+                    },
+                    suggested_action="convert_to_datetime",
+                    reason=(
+                        "Every non-missing value looks like a date, but "
+                        "the column is stored as text."
+                    ),
+                )
+            )
     return findings
 
 
@@ -459,6 +543,7 @@ def diagnose(df: pd.DataFrame, target: str) -> list[Finding]:
         raise ValueError(" ".join(errors))
     return [
         *missing_findings(prepared),
+        *stored_as_text_findings(prepared, target),
         *duplicate_findings(prepared, target),
         imbalance_finding(prepared, target),
         *outlier_findings(prepared, target),

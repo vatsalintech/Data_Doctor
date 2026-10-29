@@ -77,6 +77,18 @@ def action_options(
                 "remove_outliers",
                 column,
             )
+        elif finding.issue_type == "stored_as_text" and column:
+            inferred_type = finding.evidence["inferred_type"]
+            action = (
+                "convert_to_number"
+                if inferred_type == "number"
+                else "convert_to_datetime"
+            )
+            add(
+                f"Convert {column} to {inferred_type}",
+                action,
+                column,
+            )
         elif finding.issue_type in {
             "id_like",
             "target_copy",

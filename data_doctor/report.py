@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from data_doctor.detectors import dataset_vitals, prepare_data
@@ -52,6 +53,7 @@ def build_run_record(
             "slice_diagnostics", []
         ),
         "test_indices": training_result.get("test_indices", []),
+        "bootstrap_metrics": training_result.get("bootstrap_metrics"),
     }
 
 
@@ -60,6 +62,38 @@ def _metric_change(before: float, after: float) -> dict[str, float]:
         "before": float(before),
         "after": float(after),
         "change": float(after - before),
+    }
+
+
+def _bootstrap_change(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+    metric: str,
+) -> dict[str, Any] | None:
+    previous_bootstrap = previous.get("bootstrap_metrics") or {}
+    current_bootstrap = current.get("bootstrap_metrics") or {}
+    if (
+        previous_bootstrap.get("seed") != current_bootstrap.get("seed")
+        or previous.get("test_rows") != current.get("test_rows")
+    ):
+        return None
+    before = np.asarray(previous_bootstrap.get(metric, []), dtype=float)
+    after = np.asarray(current_bootstrap.get(metric, []), dtype=float)
+    if not len(before) or len(before) != len(after):
+        return None
+    changes = after - before
+    lower, upper = np.quantile(changes, [0.025, 0.975])
+    if lower > 0:
+        assessment = "larger_than_wobble"
+    elif upper < 0:
+        assessment = "decline_larger_than_wobble"
+    else:
+        assessment = "within_wobble"
+    return {
+        "lower": float(lower),
+        "upper": float(upper),
+        "assessment": assessment,
+        "repetitions": int(len(changes)),
     }
 
 
@@ -118,6 +152,10 @@ def compare_runs(
             previous["macro_f1"], current["macro_f1"]
         ),
         "roc_auc": None,
+        "metric_wobble": {
+            "accuracy": _bootstrap_change(previous, current, "accuracy"),
+            "macro_f1": _bootstrap_change(previous, current, "macro_f1"),
+        },
     }
     if (
         previous.get("roc_auc") is not None
@@ -129,7 +167,30 @@ def compare_runs(
     facts["caption"] = interpretation_caption(
         previous, current, actions, facts
     )
+    facts["wobble_caption"] = wobble_caption(facts["metric_wobble"])
     return facts
+
+
+def wobble_caption(metric_wobble: dict[str, Any]) -> str | None:
+    """Explain whether score changes exceed normal test-set variation."""
+    accuracy = metric_wobble.get("accuracy")
+    if not accuracy:
+        return None
+    assessment = accuracy["assessment"]
+    if assessment == "larger_than_wobble":
+        return (
+            "The accuracy improvement is larger than normal test-set "
+            "wobble in the bootstrap check."
+        )
+    if assessment == "decline_larger_than_wobble":
+        return (
+            "The accuracy decline is larger than normal test-set wobble "
+            "in the bootstrap check."
+        )
+    return (
+        "The accuracy change is within normal test-set wobble, so it may "
+        "not represent a repeatable improvement or decline."
+    )
 
 
 def interpretation_caption(
@@ -147,7 +208,25 @@ def interpretation_caption(
         for action in actions
         if action["action"] == "drop_column"
     ]
-    if dropped_columns and accuracy_change <= -0.05:
+    accuracy_wobble = facts.get("metric_wobble", {}).get("accuracy")
+    f1_wobble = facts.get("metric_wobble", {}).get("macro_f1")
+    accuracy_decline_is_clear = (
+        not accuracy_wobble
+        or accuracy_wobble["assessment"] == "decline_larger_than_wobble"
+    )
+    accuracy_gain_is_clear = (
+        not accuracy_wobble
+        or accuracy_wobble["assessment"] == "larger_than_wobble"
+    )
+    f1_gain_is_clear = (
+        not f1_wobble
+        or f1_wobble["assessment"] == "larger_than_wobble"
+    )
+    if (
+        dropped_columns
+        and accuracy_change <= -0.05
+        and accuracy_decline_is_clear
+    ):
         return (
             "The earlier score may have been too optimistic because "
             "accuracy fell after a column was removed."
@@ -157,6 +236,7 @@ def interpretation_caption(
     if (
         current.get("class_weight") == "balanced"
         and f1_change > 0.01
+        and f1_gain_is_clear
         and abs(accuracy_change) < 0.01
     ):
         return (
@@ -167,7 +247,7 @@ def interpretation_caption(
         "train_rows_after_cleaning", previous["train_rows_after"]
     )
     if facts["train_rows"]["change"] < -0.10 * previous_clean_rows:
-        if accuracy_change > 0.03:
+        if accuracy_change > 0.03 and accuracy_gain_is_clear:
             return (
                 "The score rose after many rows were removed; those rows "
                 "may have contained harder examples."

@@ -2,6 +2,9 @@ from pathlib import Path
 
 from streamlit.testing.v1 import AppTest
 
+from data_doctor.detectors import Finding
+from streamlit_ui.components.dataset_issues import dataset_issue_findings
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
@@ -156,4 +159,17 @@ def test_upload_mode_explains_that_large_files_can_take_time():
         "Large files can take a few minutes to train" in caption.value
         for caption in app.caption
     )
+
+
+def test_stored_text_columns_are_promoted_to_dataset_issues():
+    finding = Finding(
+        issue_type="stored_as_text",
+        scope="amount",
+        severity="medium",
+        found=True,
+        evidence={"inferred_type": "number"},
+        suggested_action="convert_to_number",
+        reason="Stored as text.",
+    )
+    assert dataset_issue_findings([finding]) == [finding]
 

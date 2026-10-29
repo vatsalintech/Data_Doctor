@@ -19,12 +19,17 @@ from sklearn.metrics import (
 )
 from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.preprocessing import (
+    FunctionTransformer,
+    OneHotEncoder,
+    StandardScaler,
+)
 
 from data_doctor.detectors import prepare_data
 from data_doctor.treatments import apply_actions_to_split
 
 Sampling = Optional[Literal["oversample", "undersample"]]
+BOOTSTRAP_REPETITIONS = 400
 
 
 def _prepare_table(df: pd.DataFrame) -> pd.DataFrame:
@@ -57,8 +62,12 @@ def _group_aware_split(
     """Keep identical feature rows together while preserving class balance."""
     groups = pd.util.hash_pandas_object(x, index=False)
     group_table = pd.DataFrame({"group": groups, "target": y})
-    group_targets = group_table.groupby("group", sort=False)["target"].agg(
-        lambda values: values.mode(dropna=True).iloc[0]
+    # One representative label is enough to stratify each indivisible
+    # feature group. Selecting it vectorially avoids a costly Python
+    # ``mode`` call for every group (often every row in a large table).
+    group_targets = (
+        group_table.drop_duplicates("group", keep="first")
+        .set_index("group")["target"]
     )
     group_counts = group_targets.value_counts()
     if len(group_targets) < 2 or group_counts.min() < 2:
@@ -122,6 +131,18 @@ def _resample_training_rows(
     )
 
 
+def _datetime_to_days(values: Any) -> np.ndarray:
+    """Convert datetime columns to floating-point days since Unix epoch."""
+    frame = pd.DataFrame(values)
+    converted = np.empty(frame.shape, dtype=float)
+    for index, column in enumerate(frame.columns):
+        dates = pd.to_datetime(frame[column], errors="coerce")
+        numeric = dates.astype("int64").to_numpy(dtype=float)
+        numeric[dates.isna().to_numpy()] = np.nan
+        converted[:, index] = numeric / 86_400_000_000_000
+    return converted
+
+
 def _build_pipeline(
     x_train: pd.DataFrame,
     *,
@@ -131,10 +152,16 @@ def _build_pipeline(
     numeric_columns = x_train.select_dtypes(
         include="number"
     ).columns.tolist()
+    datetime_columns = [
+        column
+        for column in x_train.columns
+        if pd.api.types.is_datetime64_any_dtype(x_train[column])
+    ]
     categorical_columns = [
         column
         for column in x_train.columns
         if column not in numeric_columns
+        and column not in datetime_columns
     ]
     transformers = []
     if numeric_columns:
@@ -151,6 +178,26 @@ def _build_pipeline(
                     ]
                 ),
                 numeric_columns,
+            )
+        )
+    if datetime_columns:
+        transformers.append(
+            (
+                "datetime",
+                Pipeline(
+                    steps=[
+                        (
+                            "to_days",
+                            FunctionTransformer(
+                                _datetime_to_days,
+                                validate=False,
+                            ),
+                        ),
+                        ("imputer", SimpleImputer(strategy="median")),
+                        ("scaler", StandardScaler()),
+                    ]
+                ),
+                datetime_columns,
             )
         )
     if categorical_columns:
@@ -189,7 +236,7 @@ def _build_pipeline(
         max_iter=2000,
         class_weight=class_weight,
         random_state=seed,
-        solver="saga",
+        solver="lbfgs",
     )
     return Pipeline(
         steps=[("preprocessor", preprocessor), ("model", model)]
@@ -216,7 +263,7 @@ def _feature_relevance(
             continue
         output_slice = preprocessor.output_indices_[name]
         scores = encoded_relevance[output_slice]
-        if name == "numeric":
+        if name in {"numeric", "datetime"}:
             for column, score in zip(columns, scores):
                 relevance[column] += float(score)
         elif name == "categorical":
@@ -284,6 +331,73 @@ def _slice_diagnostics(
                 }
             )
     return rows
+
+
+def _bootstrap_metric_samples(
+    y_test: pd.Series,
+    predictions: np.ndarray,
+    labels: list[Any],
+    *,
+    seed: int,
+    repetitions: int = BOOTSTRAP_REPETITIONS,
+    batch_size: int = 20,
+) -> dict[str, Any]:
+    """Bootstrap test metrics with bounded memory and a repeatable seed."""
+    truth = y_test.to_numpy()
+    guesses = np.asarray(predictions)
+    row_count = len(truth)
+    label_codes = {label: index for index, label in enumerate(labels)}
+    truth_codes = np.fromiter(
+        (label_codes[value] for value in truth),
+        dtype=np.int32,
+        count=row_count,
+    )
+    prediction_codes = np.fromiter(
+        (label_codes[value] for value in guesses),
+        dtype=np.int32,
+        count=row_count,
+    )
+    cell_codes = truth_codes * len(labels) + prediction_codes
+    rng = np.random.default_rng(seed)
+    accuracy_samples: list[float] = []
+    macro_f1_samples: list[float] = []
+
+    for start in range(0, repetitions, batch_size):
+        size = min(batch_size, repetitions - start)
+        sampled_rows = rng.integers(
+            0,
+            row_count,
+            size=(size, row_count),
+            dtype=np.int32,
+        )
+        for sampled_cells in cell_codes[sampled_rows]:
+            matrix = np.bincount(
+                sampled_cells,
+                minlength=len(labels) ** 2,
+            ).reshape(len(labels), len(labels))
+            accuracy_samples.append(float(np.trace(matrix) / row_count))
+            actual = matrix.sum(axis=1)
+            predicted = matrix.sum(axis=0)
+            denominator = actual + predicted
+            class_f1 = np.divide(
+                2 * np.diag(matrix),
+                denominator,
+                out=np.zeros(len(labels), dtype=float),
+                where=denominator != 0,
+            )
+            active_classes = int((denominator != 0).sum())
+            macro_f1_samples.append(
+                float(class_f1.sum() / active_classes)
+                if active_classes
+                else 0.0
+            )
+
+    return {
+        "repetitions": repetitions,
+        "seed": seed,
+        "accuracy": accuracy_samples,
+        "macro_f1": macro_f1_samples,
+    }
 
 
 def train_model(
@@ -396,6 +510,13 @@ def train_model(
         )
         metrics["roc_auc_positive_class"] = str(model_labels[1])
 
+    bootstrap_metrics = _bootstrap_metric_samples(
+        y_test,
+        predictions,
+        labels,
+        seed=seed + 10_000,
+    )
+
     return {
         "metrics": metrics,
         "pipeline": pipeline,
@@ -417,6 +538,7 @@ def train_model(
         "feature_relevance": relevance,
         "warnings": training_warnings,
         "unseen_test_labels": unseen_test_labels,
+        "bootstrap_metrics": bootstrap_metrics,
         "slice_diagnostics": _slice_diagnostics(
             original_test_features.loc[x_test.index],
             y_test,

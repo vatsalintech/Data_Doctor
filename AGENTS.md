@@ -22,7 +22,7 @@ The unique part is the training history: baseline vs later runs, with a factual 
 - Feature relevance is available after training. Aggregate absolute Logistic Regression coefficients back to source columns, describe them as model influence rather than causation, and let the user explicitly drop selected columns.
 - Do not call an LLM to decide issues or write suggestions. Rules decide. Templates explain.
 - Streamlit is the UI, built after the prototype script works.
-- Stack: pandas, NumPy, scikit-learn, Streamlit.
+- Stack: Python 3.12, pandas, NumPy, scikit-learn, Streamlit.
 
 ## Product flow
 
@@ -90,6 +90,7 @@ Provide **Reset to original**. Do not build full per-click undo in v1.
 - cap or remove outliers
 - drop a column
 - drop rows with bad or conflicting labels
+- explicitly convert a feature containing numbers or dates stored as text
 
 **Training-only actions do not change the download:**
 
@@ -113,6 +114,7 @@ The baseline is the **smallest pipeline that makes the model runnable**:
 - Logistic Regression
 - fixed random seed
 - stratified train/test split
+- `lbfgs` solver
 
 Call this **Trainable raw**. Later runs are **Trainable raw + the extra cleaning the user has applied**.
 
@@ -124,6 +126,8 @@ Call this **Trainable raw**. Later runs are **Trainable raw + the extra cleaning
 4. The test set stays as close as possible to the original test split.
 5. Dropping a column, including a leaky or ID column, happens on both train and test. Rows stay the same.
 6. Same model, same seed, same metrics every run.
+7. Deterministic type conversion applies to both train and test. It is never
+   inferred and applied silently.
 
 If these rules are skipped, the before/after story is not trustworthy.
 
@@ -131,13 +135,19 @@ If these rules are skipped, the before/after story is not trustworthy.
 
 Always show accuracy, macro F1, and a confusion matrix. Add ROC-AUC for binary targets.
 
+For accuracy and macro F1, retain deterministic bootstrap samples from the
+test predictions. Between-run comparisons use paired samples to show a 95%
+range for the metric change and say whether the change is within normal
+test-set wobble. Do not describe an improvement or decline as meaningful when
+its bootstrap range includes zero.
+
 When classes are imbalanced, say that accuracy can look fine while macro F1 is poor.
 
 Also show train rows before vs after cleaning, rows after optional sampling, columns dropped, and the between-run caption. Count train rows before immediately after the split, after cleaning before sampling, and after sampling separately. Between-run row interpretations use the after-cleaning count so oversampling is never described as row deletion.
 
 ## v1 checks and actions
 
-Six checks only.
+Seven checks only.
 
 ### 1. Missing values
 
@@ -171,9 +181,21 @@ Actions: keep and review, drop those rows, or recode a label only when the user 
 
 ### 6. Leakage warning signs
 
-Flag: target included again as a feature, a column identical or almost identical to the target, ID-like columns (almost every value unique), a feature whose values map to the target with suspiciously near-perfect accuracy and meaningful lift over the majority-class baseline, duplicate rows that could land in both train and test.
+Flag: target included again as a feature, a column identical or almost identical to the target, ID-like columns (almost every value unique), a feature whose values map to the target with suspiciously near-perfect accuracy and meaningful lift over the majority-class baseline, duplicate rows that could land in both train and test. Datetime columns are not IDs merely because their values are unique.
 
 Actions: drop the suspicious column, drop the ID-like column, or keep it with a warning.
+
+### 7. Numbers or dates stored as text
+
+Inspect non-target text columns. Flag a column only when every non-missing
+value safely parses as one inferred type. A numeric parse must contain only
+finite values; `inf`, `-inf`, and overflowed values are not model-ready
+numbers. Numeric-looking values with leading zeros remain text because they
+may be identifiers.
+
+Actions: explicitly convert to number or datetime. Never convert
+automatically. Conversion changes the working CSV and applies to both train
+and test during honest evaluation.
 
 ## Where actions appear
 
@@ -182,6 +204,8 @@ Actions: drop the suspicious column, drop the ID-like column, or keep it with a 
 - duplicate rows
 - conflicting labels
 - class imbalance
+- unresolved numbers-or-dates-stored-as-text findings, with the column name
+  and explicit conversion action
 
 **Column card** for a normal numeric column: type, missing count, min / max / median, outlier count. Actions: impute, cap, drop outlier rows, drop column.
 
@@ -193,12 +217,19 @@ Actions: drop the suspicious column, drop the ID-like column, or keep it with a 
 
 **Target column**: class counts, rare classes, weird labels. The user cannot drop the target. Actions are row/label actions only.
 
+A feature flagged as stored-as-text appears in Dataset-wide issues for
+visibility and remains in Column analysis so every warning and applicable
+action for that column stays visible. After explicit conversion, diagnose it
+again and remove only the resolved stored-as-text warning.
+
 For missing-like labels, expose both **Drop missing-like target rows** and an explicit **Recode a target label** control when there is a concrete stored label value to replace. Recode requires the user to choose the old value and enter the new value.
 
 ## Severity
 
 - **High**: target leakage signs, a column that duplicates the target, conflicting labels, duplicates that can leak across train and test
-- **Medium**: lots of missing values, severe imbalance, many duplicate rows, strong outliers in a numeric feature
+- **Medium**: lots of missing values, severe imbalance, many duplicate rows,
+  strong outliers in a numeric feature, or a feature safely inferred as
+  numeric/datetime but still stored as text
 - **Low**: a few missing cells, mild outliers, a non-leaky ID, a rare but usable class
 
 Display severity consistently in both dataset and column cards: high is red, medium is yellow, low is blue, and no issue is green.
@@ -215,6 +246,8 @@ Start with these. Add a rule only after a real case is handled badly.
 - Same features, different label → suggest review or drop those rows.
 - One class much rarer than the others → suggest `class_weight="balanced"` at train time.
 - Target has only one class, or looks like an ID → block training and explain why.
+- Every non-missing text value safely parses as a number or date → suggest an
+  explicit type conversion.
 
 ## Between-run rulebook
 
@@ -224,6 +257,9 @@ Start with these. Add a rule only after a real case is handled badly.
 - Deleted many rows and the score jumped → they may have removed hard examples.
 - Imputed missing values and the score barely changed → missingness was not the main problem.
 - No rule matches → facts only.
+
+Apply between-run interpretation rules only when the matching metric change
+is outside its bootstrap wobble range. Always show the bootstrap assessment.
 
 ## Files the app should accept
 
@@ -338,24 +374,24 @@ Do not start with Streamlit.
 - user accounts or a database
 - downloading scaled or encoded data
 
-## Later
-
-Not part of v1. Do not build these until the six v1 checks and the prototype script work.
-
-- **Stored as text.** Detect a column whose values are numbers but are stored as text, or dates stored as text, and offer a conversion the user can choose. Same idea for other types that show up the same way. Do not convert automatically.
-- The clean telco file is the example for the number case: `TotalCharges` is text there because 11 cells are blank, so a normal missing-value count stays at 0. Leave `telco_messy.csv` numeric so the v1 missing-value and outlier checks can see that column.
-
 ## Current status
 
 Three immutable originals live in `data/Original/`: Telco churn (`Churn`), Adult income (`income`), and credit-card fraud (`Class`). Run `python data/build_messy_datasets.py` to create deterministic messy copies and `data/Messy/issue_manifest.json`. The manifest is the source of truth for original versus planted issues.
 
 Checks are target-agnostic structured functions in `data_doctor/detectors.py`. `notebooks/prototype.py` is only a command-line demo runner. Training is intentionally separate in `notebooks/model_training.py` as `train_model(df, target)`; the UI imports it directly. No detector or training function may hardcode demo target or feature names.
 
+Stored-as-text detection supports safe numeric and date inference for feature
+columns. The clean Telco `TotalCharges` column is the numeric-text regression
+case; the messy Telco copy remains numeric for missing-value and outlier
+checks. Conversion is always an explicit working-data action.
+
+Large-table training uses vectorized representative-label selection for the
+duplicate-safe split. Saved runs include deterministic bootstrap samples for
+paired accuracy and macro-F1 wobble checks.
+
 `app.py` is the small entry point for the one-page Streamlit v1 app.
 `streamlit_ui/` owns its page composition and components. It keeps original
 data, a working copy, action log, and run history in session state. The user
 chooses the target before target-dependent diagnosis and trains only on demand.
-
-Type detection for numbers or dates stored as text remains on the Later list.
 
 When a product decision changes, update this file in the same session so the next agent does not follow a stale rule.

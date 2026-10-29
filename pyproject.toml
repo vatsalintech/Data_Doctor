@@ -2,7 +2,7 @@
 name = "datadoctor"
 version = "0.2.0"
 description = "Rule-based classification dataset health and intervention lab"
-requires-python = ">=3.9,<3.14"
+requires-python = ">=3.12,<3.13"
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

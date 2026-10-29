@@ -26,6 +26,7 @@ LEARNED_ACTIONS = {
     "group_rare_categories",
 }
 COLUMN_ACTIONS = {"drop_column"}
+TYPE_ACTIONS = {"convert_to_number", "convert_to_datetime"}
 
 
 def action_scope(action: str) -> str:
@@ -34,7 +35,11 @@ def action_scope(action: str) -> str:
         return "training_rows"
     if action in LEARNED_ACTIONS:
         return "fit_on_train_apply_to_both"
-    if action in COLUMN_ACTIONS or action == "fill_constant":
+    if (
+        action in COLUMN_ACTIONS
+        or action in TYPE_ACTIONS
+        or action == "fill_constant"
+    ):
         return "apply_to_train_and_test"
     if action == "keep_with_warning":
         return "log_only"
@@ -62,6 +67,27 @@ def coerce_constant(value: Any, series: pd.Series) -> Any:
             return False
         raise ValueError("The constant must be true or false.")
     return value
+
+
+def _convert_stored_text(series: pd.Series, action: str) -> pd.Series:
+    normalized = series
+    if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(
+        series
+    ):
+        stripped = series.astype("string").str.strip()
+        normalized = stripped.mask(stripped.isin({"", "?"}), pd.NA)
+    if action == "convert_to_number":
+        converted = pd.to_numeric(normalized, errors="raise")
+        finite_values = converted.dropna().to_numpy(dtype=float)
+        if not np.isfinite(finite_values).all():
+            raise ValueError(
+                "The column contains infinity and cannot be safely "
+                "converted to a model-ready number."
+            )
+        return converted
+    if action == "convert_to_datetime":
+        return pd.to_datetime(normalized, errors="raise", format="mixed")
+    raise ValueError(f"Unsupported type conversion: {action}")
 
 
 def _entry(
@@ -158,6 +184,13 @@ def apply_action(
         typed_value = coerce_constant(value, result[column])
         details["fill_value"] = _python_scalar(typed_value)
         result[column] = result[column].fillna(typed_value)
+    elif action in TYPE_ACTIONS:
+        if column is None:
+            raise ValueError("A column is required.")
+        result[column] = _convert_stored_text(result[column], action)
+        details["converted_to"] = (
+            "number" if action == "convert_to_number" else "datetime"
+        )
     elif action == "cap_outliers":
         if column is None:
             raise ValueError("A column is required.")
@@ -287,6 +320,11 @@ def apply_actions_to_split(
             )
             x_train[column] = x_train[column].fillna(fill_value)
             x_test[column] = x_test[column].fillna(fill_value)
+        elif action in TYPE_ACTIONS and column in x_train.columns:
+            x_train[column] = _convert_stored_text(
+                x_train[column], action
+            )
+            x_test[column] = _convert_stored_text(x_test[column], action)
         elif action in {"cap_outliers", "remove_outliers"}:
             if column not in x_train.columns:
                 continue

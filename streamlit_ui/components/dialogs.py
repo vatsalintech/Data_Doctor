@@ -104,12 +104,24 @@ def _render_run_comparison(history: list[dict[str, Any]]) -> None:
         ):
             values = comparison[key]
             if values is not None:
+                wobble = comparison["metric_wobble"].get(key)
                 metric_rows.append(
                     {
                         "Metric": label,
                         "Before": values["before"],
                         "After": values["after"],
                         "Change": values["change"],
+                        "95% bootstrap range": (
+                            f"{wobble['lower']:+.3f} to "
+                            f"{wobble['upper']:+.3f}"
+                            if wobble
+                            else "Not available"
+                        ),
+                        "Wobble check": (
+                            wobble["assessment"].replace("_", " ")
+                            if wobble
+                            else "Not available"
+                        ),
                     }
                 )
         st.dataframe(
@@ -140,6 +152,8 @@ def _render_run_comparison(history: list[dict[str, Any]]) -> None:
             )
         if comparison["caption"]:
             st.caption(comparison["caption"])
+        if comparison["wobble_caption"]:
+            st.info(comparison["wobble_caption"])
 
 
 def _render_slice_diagnostics(latest: dict[str, Any]) -> None:

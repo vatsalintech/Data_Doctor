@@ -6,7 +6,7 @@ Logistic Regression runs. It never auto-cleans the uploaded table.
 
 ## Setup
 
-Use Python 3.9 through 3.13.
+Use Python 3.12.
 
 ```bash
 python3 -m venv .venv
@@ -68,7 +68,10 @@ It also provides:
 
 - leakage-safe, repeatable train/test splits that keep duplicate feature
   groups together
-- action impact previews on the same frozen split
+- bootstrap checks that separate likely score changes from normal test-set
+  wobble
+- dataset-wide warnings and opt-in conversion when a feature contains
+  numbers or dates stored as text
 - guarded per-group slice metrics
 - downloadable data-health reports and inferred dataset contracts
 - reference-versus-new CSV contract and drift checks

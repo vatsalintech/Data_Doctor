@@ -7,6 +7,7 @@ from data_doctor.detectors import (
     diagnose,
     id_like_columns,
     prepare_data,
+    stored_as_text_findings,
 )
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -58,6 +59,57 @@ def test_prepare_data_recognizes_blank_and_question_mark():
     df = pd.DataFrame({"feature": ["ok", " ", "?"], "label": [0, 1, 0]})
     prepared = prepare_data(df)
     assert prepared["feature"].isna().sum() == 2
+
+
+def test_stored_as_text_detects_numbers_and_dates_but_not_padded_ids():
+    df = pd.DataFrame(
+        {
+            "amount": ["1.5", "2.0", "3.25", None],
+            "event_date": [
+                "2026-01-01",
+                "2026-01-02",
+                "2026-01-03",
+                None,
+            ],
+            "postal_code": ["00101", "00102", "00103", "00104"],
+            "non_finite": ["1.0", "2.0", "3.0", "inf"],
+            "label": ["yes", "no", "yes", "no"],
+        }
+    )
+    findings = stored_as_text_findings(prepare_data(df), "label")
+    inferred = {
+        finding.scope: finding.evidence["inferred_type"]
+        for finding in findings
+    }
+    assert inferred == {"amount": "number", "event_date": "date"}
+
+
+def test_clean_telco_total_charges_is_detected_as_numeric_text():
+    df = pd.read_csv(ROOT / "data" / "Original" / "Telco-Customer-Churn.csv")
+    findings = stored_as_text_findings(prepare_data(df), "Churn")
+    assert any(
+        finding.scope == "TotalCharges"
+        and finding.evidence["inferred_type"] == "number"
+        for finding in findings
+    )
+
+
+def test_datetime_columns_are_not_treated_as_ids():
+    rows = 30
+    df = pd.DataFrame(
+        {
+            "event_date": pd.date_range("2026-01-01", periods=rows),
+            "feature": [index % 4 for index in range(rows)],
+            "label": ["yes", "no"] * (rows // 2),
+        }
+    )
+    assert "event_date" not in id_like_columns(df)
+    findings = diagnose(df, "label")
+    assert not any(
+        finding.issue_type == "id_like"
+        and finding.scope == "event_date"
+        for finding in findings
+    )
 
 
 def test_leakage_detector_flags_near_perfect_target_mapping():
