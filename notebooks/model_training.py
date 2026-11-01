@@ -13,8 +13,11 @@ from sklearn.impute import SimpleImputer
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    average_precision_score,
     confusion_matrix,
     f1_score,
+    precision_score,
+    recall_score,
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
@@ -294,10 +297,17 @@ def _slice_diagnostics(
     y_test: pd.Series,
     predictions: np.ndarray,
 ) -> list[dict[str, Any]]:
-    """Return guarded per-group metrics for categorical test slices."""
+    """Return guarded per-group metrics for categorical test slices.
+
+    A group needs enough rows to be shown. Macro F1 is included only when
+    every target class also has enough rows inside that group. A large
+    group that contains only one class still reports accuracy.
+    """
     minimum_support = max(10, int(np.ceil(len(x_test) * 0.05)))
+    minimum_class_rows = 5
     rows: list[dict[str, Any]] = []
     predicted = pd.Series(predictions, index=y_test.index)
+    required_classes = pd.Series(y_test).dropna().value_counts()
     categorical = x_test.select_dtypes(
         include=["object", "string", "category", "bool"]
     )
@@ -314,20 +324,50 @@ def _slice_diagnostics(
                 continue
             truth = y_test.loc[indices]
             guess = predicted.loc[indices]
+            class_counts = truth.value_counts(dropna=True)
+            aligned = class_counts.reindex(
+                required_classes.index, fill_value=0
+            )
+            class_count = int((class_counts > 0).sum())
+            smallest_class_count = (
+                int(class_counts.min()) if class_count else 0
+            )
+            macro_f1 = None
+            note = None
+            classes_are_represented = (
+                len(required_classes) >= 2
+                and int(aligned.min()) >= minimum_class_rows
+            )
+            if classes_are_represented:
+                macro_f1 = float(
+                    f1_score(
+                        truth,
+                        guess,
+                        average="macro",
+                        labels=list(required_classes.index),
+                        zero_division=0,
+                    )
+                )
+            elif class_count < 2:
+                note = (
+                    "Only one target class appears here, so macro F1 "
+                    "is omitted."
+                )
+            else:
+                note = (
+                    "A target class has fewer than 5 rows here, so "
+                    "macro F1 is omitted."
+                )
             rows.append(
                 {
                     "column": column,
                     "value": "(missing)" if pd.isna(value) else str(value),
                     "support": int(len(indices)),
+                    "class_count": class_count,
+                    "smallest_class_count": smallest_class_count,
                     "accuracy": float(accuracy_score(truth, guess)),
-                    "macro_f1": float(
-                        f1_score(
-                            truth,
-                            guess,
-                            average="macro",
-                            zero_division=0,
-                        )
-                    ),
+                    "macro_f1": macro_f1,
+                    "note": note or "",
                 }
             )
     return rows
@@ -409,6 +449,7 @@ def train_model(
     class_weight: str | None = None,
     sampling: Sampling = None,
     actions: list[dict[str, Any]] | None = None,
+    positive_class: str | None = None,
 ) -> dict[str, Any]:
     """Split, preprocess, train, and evaluate Logistic Regression.
 
@@ -490,10 +531,29 @@ def train_model(
         pipeline, x_train.columns.tolist()
     )
 
+    # Save probabilities for threshold-free metrics and UI threshold slider
+    test_probabilities: np.ndarray = pipeline.predict_proba(x_test)
+    test_prob_labels: list[str] = [str(c) for c in model_labels]
+
     metrics: dict[str, Any] = {
         "accuracy": float(accuracy_score(y_test, predictions)),
         "macro_f1": float(
             f1_score(y_test, predictions, average="macro")
+        ),
+        "macro_precision": float(
+            precision_score(y_test, predictions, average="macro", zero_division=0)
+        ),
+        "macro_recall": float(
+            recall_score(y_test, predictions, average="macro", zero_division=0)
+        ),
+        "weighted_precision": float(
+            precision_score(y_test, predictions, average="weighted", zero_division=0)
+        ),
+        "weighted_recall": float(
+            recall_score(y_test, predictions, average="weighted", zero_division=0)
+        ),
+        "weighted_f1": float(
+            f1_score(y_test, predictions, average="weighted", zero_division=0)
         ),
         "confusion_matrix": confusion_matrix(
             y_test, predictions, labels=labels
@@ -501,14 +561,58 @@ def train_model(
         "labels": [str(label) for label in labels],
         "roc_auc": None,
         "roc_auc_positive_class": None,
+        "average_precision": None,
+        "positive_class": None,
+        "per_class_metrics": [],
     }
-    if len(labels) == 2 and len(model_labels) == 2:
-        probabilities = pipeline.predict_proba(x_test)[:, 1]
-        binary_truth = (y_test == model_labels[1]).astype(int)
-        metrics["roc_auc"] = float(
-            roc_auc_score(binary_truth, probabilities)
-        )
-        metrics["roc_auc_positive_class"] = str(model_labels[1])
+
+    # Per-class precision, recall, F1
+    per_class: list[dict[str, Any]] = []
+    class_precisions = precision_score(
+        y_test, predictions, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_recalls = recall_score(
+        y_test, predictions, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_f1s = f1_score(
+        y_test, predictions, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_supports = [
+        int((y_test == cls).sum()) for cls in model_labels
+    ]
+    for cls, prec, rec, f1_val, sup in zip(
+        model_labels, class_precisions, class_recalls, class_f1s, class_supports
+    ):
+        per_class.append({
+            "class": str(cls),
+            "precision": float(prec),
+            "recall": float(rec),
+            "f1": float(f1_val),
+            "support": sup,
+        })
+    metrics["per_class_metrics"] = per_class
+
+    # Binary-only metrics: ROC-AUC, PR-AUC, positive-class Precision/Recall/F1
+    is_binary = len(labels) == 2 and len(model_labels) == 2
+    if is_binary:
+        # Resolve positive class: user choice → second sorted class as fallback
+        sorted_model_labels = [str(c) for c in model_labels]
+        if positive_class and str(positive_class) in sorted_model_labels:
+            pos_class = str(positive_class)
+        else:
+            pos_class = sorted_model_labels[1]
+        metrics["positive_class"] = pos_class
+        pos_idx = sorted_model_labels.index(pos_class)
+        pos_probabilities = test_probabilities[:, pos_idx]
+        binary_truth = (y_test.astype(str) == pos_class).astype(int)
+        if binary_truth.sum() > 0:
+            metrics["roc_auc"] = float(
+                roc_auc_score(binary_truth, pos_probabilities)
+            )
+            metrics["average_precision"] = float(
+                average_precision_score(binary_truth, pos_probabilities)
+            )
+        metrics["roc_auc_positive_class"] = pos_class
 
     bootstrap_metrics = _bootstrap_metric_samples(
         y_test,
@@ -525,12 +629,16 @@ def train_model(
         "test_size": test_size,
         "class_weight": class_weight,
         "sampling": sampling,
+        "positive_class": positive_class,
         "train_rows_before": int(train_rows_before),
         "train_rows_after": int(train_rows_after_sampling),
         "train_rows_after_cleaning": int(train_rows_after_cleaning),
         "train_rows_after_sampling": int(train_rows_after_sampling),
         "test_rows": int(len(x_test)),
         "test_indices": x_test.index.tolist(),
+        "test_probabilities": test_probabilities.tolist(),
+        "test_prob_labels": test_prob_labels,
+        "y_test": y_test.tolist(),
         "missing_target_rows_excluded": missing_target_rows,
         "columns": x.columns.tolist(),
         "row_count": int(len(usable)),

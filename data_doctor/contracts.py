@@ -19,6 +19,23 @@ def _dtype_family(series: pd.Series) -> str:
     return "categorical"
 
 
+def _missingness_slack(missing_rate: float) -> float:
+    """Allowed movement before missingness is unexpected.
+
+    The cushion is at least 5 percentage points and at most 10, so a
+    mostly-missing column can still fail when it becomes fully missing.
+    """
+    rate = float(missing_rate)
+    return max(0.05, min(0.10, rate * 0.25))
+
+
+def _missingness_ceiling(missing_rate: float) -> float:
+    rate = float(missing_rate)
+    if rate >= 1:
+        return 1.0
+    return round(min(rate + _missingness_slack(rate), 0.9999), 4)
+
+
 def infer_contract(df: pd.DataFrame, target: str) -> dict[str, Any]:
     """Infer a conservative validation contract from the working table."""
     columns: dict[str, Any] = {}
@@ -29,9 +46,7 @@ def infer_contract(df: pd.DataFrame, target: str) -> dict[str, Any]:
         rule: dict[str, Any] = {
             "dtype_family": family,
             "required": True,
-            "missing_rate_ceiling": min(
-                1.0, round(missing_rate + max(0.05, missing_rate * 0.25), 4)
-            ),
+            "missing_rate_ceiling": _missingness_ceiling(missing_rate),
         }
         unique = series.dropna().unique()
         if family in {"categorical", "boolean"} and len(unique) <= 50:
@@ -119,23 +134,70 @@ def contract_json(contract: dict[str, Any]) -> bytes:
     return json.dumps(contract, indent=2).encode("utf-8")
 
 
+def _stability_index(
+    reference_counts: np.ndarray,
+    current_counts: np.ndarray,
+) -> float:
+    """PSI with a tiny share substituted for an empty bin.
+
+    Bins are not renormalized after that substitution. An empty bin stays
+    visible, and the logarithm stays finite.
+    """
+    reference_share = reference_counts / reference_counts.sum()
+    current_share = current_counts / current_counts.sum()
+    reference_share = np.where(
+        reference_counts == 0, 1e-6, reference_share
+    )
+    current_share = np.where(current_counts == 0, 1e-6, current_share)
+    return float(
+        np.sum(
+            (current_share - reference_share)
+            * np.log(current_share / reference_share)
+        )
+    )
+
+
+def _discrete_psi(reference: pd.Series, current: pd.Series) -> float:
+    """Compare numeric values when quantile bins collapse to one or two edges."""
+    categories = list(pd.unique(reference))
+    reference_counts = (
+        reference.value_counts()
+        .reindex(categories, fill_value=0)
+        .to_numpy(dtype=float)
+    )
+    current_counts = (
+        current.value_counts()
+        .reindex(categories, fill_value=0)
+        .to_numpy(dtype=float)
+    )
+    unseen = float((~current.isin(categories)).sum())
+    reference_counts = np.append(reference_counts, 0.0)
+    current_counts = np.append(current_counts, unseen)
+    return _stability_index(reference_counts, current_counts)
+
+
 def _numeric_psi(reference: pd.Series, current: pd.Series) -> float | None:
     reference = pd.to_numeric(reference, errors="coerce").dropna()
     current = pd.to_numeric(current, errors="coerce").dropna()
     if len(reference) < 20 or len(current) < 20:
         return None
-    boundaries = np.unique(
-        reference.quantile(np.linspace(0, 1, 11)).to_numpy()
+    edges = np.unique(
+        reference.quantile(np.linspace(0, 1, 11)).to_numpy(dtype=float)
     )
-    if len(boundaries) < 3:
-        return 0.0
-    boundaries[0], boundaries[-1] = -np.inf, np.inf
-    ref_counts = np.histogram(reference, bins=boundaries)[0]
-    cur_counts = np.histogram(current, bins=boundaries)[0]
-    ref_share = np.clip(ref_counts / ref_counts.sum(), 1e-6, None)
-    cur_share = np.clip(cur_counts / cur_counts.sum(), 1e-6, None)
-    return float(
-        np.sum((cur_share - ref_share) * np.log(cur_share / ref_share))
+    if len(edges) < 3:
+        return _discrete_psi(reference, current)
+    edges = edges.astype(float, copy=True)
+    edges[0] = -np.inf
+    edges[-1] = np.inf
+    reference_counts = np.histogram(
+        reference.to_numpy(dtype=float), bins=edges
+    )[0]
+    current_counts = np.histogram(
+        current.to_numpy(dtype=float), bins=edges
+    )[0]
+    return _stability_index(
+        reference_counts.astype(float),
+        current_counts.astype(float),
     )
 
 
@@ -166,11 +228,11 @@ def compare_datasets(
                 }
             )
             continue
+        reference_missing = float(reference[column].isna().mean())
         missing_change = float(
-            current[column].isna().mean()
-            - reference[column].isna().mean()
+            current[column].isna().mean() - reference_missing
         )
-        if abs(missing_change) >= 0.05:
+        if abs(missing_change) > _missingness_slack(reference_missing):
             results.append(
                 {
                     "column": column,
@@ -220,3 +282,33 @@ def compare_datasets(
                     }
                 )
     return results
+
+
+def classify_comparison(
+    contract_issues: list[dict[str, Any]],
+    drift: list[dict[str, Any]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Keep schema and expected missingness out of the distribution section.
+
+    Schema rows stay in the contract findings. Missingness above the ceiling
+    stays there too. A missingness drop is not a contract breach, so it is
+    reported on its own. PSI and category shifts are the distribution signals.
+    """
+    contract_missing = {
+        row["column"]
+        for row in contract_issues
+        if row["check"] == "missing_rate"
+    }
+    return {
+        "distribution": [
+            row
+            for row in drift
+            if row["check"] in {"numeric_drift", "category_drift"}
+        ],
+        "unexpected_missingness": [
+            row
+            for row in drift
+            if row["check"] == "missingness_shift"
+            and row["column"] not in contract_missing
+        ],
+    }

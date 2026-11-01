@@ -1,13 +1,28 @@
-"""Training-result and feature-relevance dialogs."""
+"""Training-result and feature-relevance dialogs with advanced metrics."""
 
 from typing import Any, Callable
 
 import altair as alt
+import numpy as np
 import pandas as pd
 import streamlit as st
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+)
 
 from data_doctor.report import compare_runs
 from streamlit_ui.state import apply_working_action
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Training result dialog
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 @st.dialog("Training result", width="large")
@@ -16,34 +31,184 @@ def render_training_results() -> None:
     if not history:
         return
     latest = history[-1]
+    metrics = latest.get("metrics", {})
+    is_binary = metrics.get("positive_class") is not None
+
     st.subheader("Latest run results")
-    metric_columns = st.columns(3 if latest["roc_auc"] is not None else 2)
-    metric_columns[0].metric("Accuracy", f"{latest['accuracy']:.3f}")
-    metric_columns[1].metric("Macro F1", f"{latest['macro_f1']:.3f}")
-    if latest["roc_auc"] is not None:
-        metric_columns[2].metric("ROC-AUC", f"{latest['roc_auc']:.3f}")
-        st.caption(
-            "ROC-AUC positive class: "
-            f"{latest.get('roc_auc_positive_class', 'not recorded')}"
+
+    # ── Threshold control (binary only) ──────────────────────────────────────
+    threshold = 0.5
+    if is_binary:
+        threshold = st.slider(
+            "Classification threshold",
+            min_value=0.01,
+            max_value=0.99,
+            value=0.5,
+            step=0.01,
+            help=(
+                "Adjust the decision boundary. "
+                "PR-AUC (Average Precision) is threshold-independent — "
+                "it is calculated from the ranking of predicted scores."
+            ),
         )
+
+    # Recompute predictions at chosen threshold (binary only)
+    result = st.session_state.latest_training_result
+    if result and is_binary and result.get("test_probabilities"):
+        y_test_raw = result["y_test"]
+        prob_labels = result["test_prob_labels"]
+        probs_array = np.array(result["test_probabilities"])
+        pos_class = metrics["positive_class"]
+        pos_idx = prob_labels.index(pos_class) if pos_class in prob_labels else 1
+        pos_probs = probs_array[:, pos_idx]
+        y_test_series = pd.Series(y_test_raw).astype(str)
+        binary_truth = (y_test_series == pos_class).astype(int)
+        threshold_preds = (pos_probs >= threshold).astype(int).tolist()
+        threshold_pred_labels = [
+            pos_class if p == 1 else [c for c in prob_labels if c != pos_class][0]
+            for p in threshold_preds
+        ]
+        threshold_accuracy = float(accuracy_score(y_test_series, threshold_pred_labels))
+        threshold_precision = float(
+            precision_score(binary_truth, threshold_preds, zero_division=0)
+        )
+        threshold_recall = float(
+            recall_score(binary_truth, threshold_preds, zero_division=0)
+        )
+        threshold_f1 = float(f1_score(binary_truth, threshold_preds, zero_division=0))
+        threshold_cm = confusion_matrix(
+            y_test_series,
+            threshold_pred_labels,
+            labels=metrics.get("labels", prob_labels),
+        ).tolist()
+    else:
+        threshold_accuracy = metrics.get("accuracy", 0.0)
+        threshold_precision = None
+        threshold_recall = None
+        threshold_f1 = None
+        threshold_cm = metrics.get("confusion_matrix")
+        threshold_pred_labels = None
+
+    # ── Core metric tiles ─────────────────────────────────────────────────────
+    n_cols = 4 if is_binary else 2
+    metric_cols = st.columns(n_cols)
+    metric_cols[0].metric(
+        "Accuracy",
+        f"{threshold_accuracy:.3f}",
+        help="Fraction of correctly classified test examples.",
+    )
+    metric_cols[1].metric(
+        "Macro F1",
+        f"{metrics.get('macro_f1', 0):.3f}",
+        help=(
+            "Average F1 across classes, treating each class equally. "
+            "More informative than accuracy when classes are imbalanced."
+        ),
+    )
+    if is_binary:
+        metric_cols[2].metric(
+            "ROC-AUC",
+            f"{metrics['roc_auc']:.3f}" if metrics.get("roc_auc") is not None else "—",
+            help="Area under the ROC curve. 1.0 = perfect, 0.5 = random.",
+        )
+        metric_cols[3].metric(
+            "Avg Precision (PR-AUC)",
+            f"{metrics['average_precision']:.3f}"
+            if metrics.get("average_precision") is not None
+            else "—",
+            help=(
+                "Average Precision summarises the Precision-Recall curve. "
+                "Particularly useful when the positive class is rare."
+            ),
+        )
+        st.caption(
+            f"Positive class: **{metrics['positive_class']}** "
+            f"(support: {sum(1 for v in (result or {}).get('y_test', []) if str(v) == metrics['positive_class']):,} "
+            f"of {len((result or {}).get('y_test', [])):,} test rows)"
+        )
+
     for message in latest.get("warnings", []):
         st.warning(message)
-    if latest["macro_f1"] + 0.10 < latest["accuracy"]:
+    if metrics.get("macro_f1", 1) + 0.10 < metrics.get("accuracy", 0):
         st.warning(
             "Accuracy is noticeably higher than macro F1. "
             "The model may be weaker on a smaller class."
         )
 
-    matrix = pd.DataFrame(
-        latest["confusion_matrix"],
-        index=[f"Actual {label}" for label in latest["labels"]],
-        columns=[f"Predicted {label}" for label in latest["labels"]],
-    )
-    st.markdown("**Confusion matrix**")
-    _, matrix_column, _ = st.columns([1, 2, 1])
-    with matrix_column:
-        st.dataframe(matrix, width="stretch")
+    # ── Threshold-dependent binary metrics ───────────────────────────────────
+    if is_binary and threshold_precision is not None:
+        st.markdown("**Threshold-dependent metrics** (at current threshold)")
+        t_cols = st.columns(3)
+        t_cols[0].metric(
+            "Precision",
+            f"{threshold_precision:.3f}",
+            help="Of all predicted positives, what fraction are truly positive?",
+        )
+        t_cols[1].metric(
+            "Recall",
+            f"{threshold_recall:.3f}",
+            help="Of all actual positives, what fraction did the model find?",
+        )
+        t_cols[2].metric(
+            "F1",
+            f"{threshold_f1:.3f}",
+            help="Harmonic mean of Precision and Recall.",
+        )
 
+    # ── Confusion matrix ──────────────────────────────────────────────────────
+    cm_labels = metrics.get("labels", [])
+    if threshold_cm and cm_labels:
+        cm_df = pd.DataFrame(
+            threshold_cm,
+            index=[f"Actual {lbl}" for lbl in cm_labels],
+            columns=[f"Predicted {lbl}" for lbl in cm_labels],
+        )
+        st.markdown("**Confusion matrix**")
+        _, matrix_col, _ = st.columns([1, 2, 1])
+        with matrix_col:
+            st.dataframe(cm_df, width="stretch")
+
+    # ── PR Curve (binary only) ────────────────────────────────────────────────
+    if (
+        is_binary
+        and result
+        and result.get("test_probabilities")
+        and metrics.get("average_precision") is not None
+    ):
+        _render_pr_curve(result, metrics, pos_probs, binary_truth, threshold)
+
+    # ── Per-class metrics ─────────────────────────────────────────────────────
+    per_class = metrics.get("per_class_metrics", [])
+    if per_class:
+        st.markdown("**Per-class metrics**")
+        pc_df = pd.DataFrame(per_class).rename(
+            columns={
+                "class": "Class",
+                "precision": "Precision",
+                "recall": "Recall",
+                "f1": "F1",
+                "support": "Support",
+            }
+        )
+        st.dataframe(
+            pc_df.style.format(
+                {"Precision": "{:.3f}", "Recall": "{:.3f}", "F1": "{:.3f}"}
+            ),
+            hide_index=True,
+            width="stretch",
+        )
+        if not is_binary:
+            mac_col, wt_col = st.columns(2)
+            mac_col.metric(
+                "Macro Precision",
+                f"{metrics.get('macro_precision', 0):.3f}",
+            )
+            wt_col.metric(
+                "Weighted Precision",
+                f"{metrics.get('weighted_precision', 0):.3f}",
+            )
+
+    # ── Run history ───────────────────────────────────────────────────────────
     st.markdown("**Run history**")
     visible = [
         "run_number",
@@ -55,14 +220,97 @@ def render_training_results() -> None:
         "train_rows_after_sampling",
         "open_issue_count",
     ]
+    history_df = pd.DataFrame(history)
+    available = [c for c in visible if c in history_df.columns]
     st.dataframe(
-        pd.DataFrame(history)[visible],
+        history_df[available],
         hide_index=True,
         width="stretch",
     )
     if len(history) >= 2:
         _render_run_comparison(history)
     _render_slice_diagnostics(latest)
+
+
+def _render_pr_curve(
+    result: dict[str, Any],
+    metrics: dict[str, Any],
+    pos_probs: np.ndarray,
+    binary_truth: pd.Series,
+    threshold: float,
+) -> None:
+    prec_arr, rec_arr, thresholds_arr = precision_recall_curve(
+        binary_truth, pos_probs
+    )
+    prevalence = float(binary_truth.mean())
+    ap = metrics.get("average_precision", 0.0)
+
+    pr_df = pd.DataFrame({"Recall": rec_arr, "Precision": prec_arr})
+    baseline_df = pd.DataFrame(
+        {"Recall": [0.0, 1.0], "Precision": [prevalence, prevalence]}
+    )
+
+    pr_line = (
+        alt.Chart(pr_df)
+        .mark_line(color="#3478c7", strokeWidth=2)
+        .encode(
+            x=alt.X("Recall:Q", scale=alt.Scale(domain=[0, 1])),
+            y=alt.Y("Precision:Q", scale=alt.Scale(domain=[0, 1])),
+            tooltip=[
+                alt.Tooltip("Recall:Q", format=".3f"),
+                alt.Tooltip("Precision:Q", format=".3f"),
+            ],
+        )
+    )
+    baseline_line = (
+        alt.Chart(baseline_df)
+        .mark_line(
+            color="#9ca3af",
+            strokeDash=[4, 4],
+            strokeWidth=1.5,
+        )
+        .encode(x="Recall:Q", y="Precision:Q")
+    )
+
+    # Threshold point
+    # Find the threshold index closest to selected threshold
+    if len(thresholds_arr) > 0:
+        closest_idx = int(np.argmin(np.abs(thresholds_arr - threshold)))
+        thresh_pt_df = pd.DataFrame(
+            {
+                "Recall": [float(rec_arr[closest_idx])],
+                "Precision": [float(prec_arr[closest_idx])],
+            }
+        )
+        threshold_point = (
+            alt.Chart(thresh_pt_df)
+            .mark_point(color="#e5484d", size=80, filled=True)
+            .encode(
+                x="Recall:Q",
+                y="Precision:Q",
+                tooltip=[
+                    alt.Tooltip("Recall:Q", title="Recall at threshold", format=".3f"),
+                    alt.Tooltip("Precision:Q", title="Precision at threshold", format=".3f"),
+                ],
+            )
+        )
+        pr_chart = (pr_line + baseline_line + threshold_point).properties(
+            height=260,
+            title=alt.TitleParams(
+                f"Precision-Recall Curve  (AP = {ap:.3f})",
+                subtitle=f"Grey dashed = positive-class prevalence ({prevalence:.1%})  •  Red dot = current threshold ({threshold:.2f})",
+                subtitleFontSize=11,
+                subtitleColor="#6b7280",
+            ),
+        )
+    else:
+        pr_chart = (pr_line + baseline_line).properties(
+            height=260,
+            title=f"Precision-Recall Curve  (AP = {ap:.3f})",
+        )
+
+    st.markdown("**Precision-Recall curve**")
+    st.altair_chart(pr_chart, use_container_width=True)
 
 
 def _render_run_comparison(history: list[dict[str, Any]]) -> None:
@@ -150,6 +398,21 @@ def _render_run_comparison(history: list[dict[str, Any]]) -> None:
                     if values["before"] != values["after"]
                 )
             )
+        if comparison.get("roc_auc_note"):
+            st.warning(comparison["roc_auc_note"])
+        elif comparison.get("roc_auc") is not None:
+            positive = history[-1].get("roc_auc_positive_class")
+            if positive and positive == history[-2].get(
+                "roc_auc_positive_class"
+            ):
+                st.caption(
+                    f"Both ROC-AUC scores use {positive} as the positive class."
+                )
+        if comparison.get("held_out_rows_match") is False:
+            st.caption(
+                "The bootstrap range is hidden because the two runs did "
+                "not score the same held-out rows."
+            )
         if comparison["caption"]:
             st.caption(comparison["caption"])
         if comparison["wobble_caption"]:
@@ -162,15 +425,39 @@ def _render_slice_diagnostics(latest: dict[str, Any]) -> None:
         return
     st.markdown("**Slice diagnostics**")
     st.caption(
-        "Test metrics for sufficiently large categorical groups. "
-        "Small groups are omitted; differences are signals to inspect, "
+        "Test metrics for categorical groups with at least 10 rows and "
+        "at least 5% of the test set. Macro F1 is shown only when every "
+        "target class has at least 5 rows in the group. Smaller groups "
+        "and thin classes are omitted. These are signals to inspect, "
         "not proof of unfairness."
     )
+    table = pd.DataFrame(slices).rename(
+        columns={
+            "column": "Column",
+            "value": "Value",
+            "support": "Rows",
+            "class_count": "Classes",
+            "smallest_class_count": "Smallest class",
+            "accuracy": "Accuracy",
+            "macro_f1": "Macro F1",
+            "note": "Note",
+        }
+    )
+    if "Note" in table.columns and table["Note"].eq("").all():
+        table = table.drop(columns=["Note"])
     st.dataframe(
-        pd.DataFrame(slices).sort_values("macro_f1"),
+        table.sort_values(
+            ["Macro F1", "Accuracy"],
+            na_position="last",
+        ),
         hide_index=True,
         width="stretch",
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Feature relevance dialog
+# ─────────────────────────────────────────────────────────────────────────────
 
 
 def _move_feature_to_drop(column: str) -> None:
@@ -228,9 +515,14 @@ def render_feature_relevance() -> None:
         relevance_table["Model influence"] * 100
     ).round(2)
     st.caption(
-        "Influence is based on absolute Logistic Regression coefficients "
-        "after preprocessing. It is not proof that a feature causes the "
-        "target."
+        "Each percentage is that column's share of the model's absolute "
+        "Logistic Regression coefficient weight. Numeric and date columns "
+        "are scaled first, so a coefficient describes a one-standard-deviation "
+        "change. A categorical percentage adds up that column's encoded "
+        "categories, and a column with many categories can therefore look "
+        "larger. Correlated columns can split one pattern across several "
+        "percentages. This is model influence, not proof that a feature "
+        "causes the target."
     )
     chart_height = min(700, max(260, len(relevance_table) * 24))
     chart = (
@@ -283,9 +575,7 @@ def _render_feature_selection(relevance: dict[str, float]) -> None:
         if column in available
     ]
     st.session_state.feature_drop_selection = selected
-    current_columns = [
-        column for column in available if column not in selected
-    ]
+    current_columns = [column for column in available if column not in selected]
     current_panel, drop_panel = st.columns(2)
     with current_panel:
         st.markdown("#### Current columns")

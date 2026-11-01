@@ -5,12 +5,6 @@ alwaysApply: true
 
 # DataDoctor
 
-Read `AGENTS.md` before changing scope, UX, or code. If this rule and `AGENTS.md` disagree, `AGENTS.md` wins. Update `AGENTS.md` when a locked decision changes.
-
-- Classification CSV tool. User picks the target, sees issues, chooses actions, downloads the working data, and trains when they want.
-- Never auto-clean. Suggestions come from detector rules. Between-run text comes from saved runs plus the action log. No LLM for decisions.
-- v1 model is Logistic Regression only. Baseline means the smallest trainable pipeline, not the raw dirty CSV.
-- Keep original data immutable. Mutate a working copy. Row fixes apply to train only. Fit imputers and scalers on train only. Dropping a column applies to train and test.
-- Leakage and bad labels are warnings. Do not silently relabel.
-- The user is a beginner. Explain in plain language and do not add v1-out-of-scope features (SMOTE, extra models, AutoML, accounts, per-click undo).
-- Shared diagnosis/treatment/reporting lives in `data_doctor/`. Reusable training lives in `notebooks/model_training.py`. Streamlit imports these functions and does not reimplement them.
+Read `AGENTS.md` before changing any scope, UX, or code decision.
+`AGENTS.md` is the authoritative source of truth. If this rule and `AGENTS.md` disagree, `AGENTS.md` wins.
+Update `AGENTS.md` (and `Decisions.md`) when a locked decision changes.

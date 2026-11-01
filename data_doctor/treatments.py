@@ -213,6 +213,10 @@ def apply_action(
     elif action == "group_rare_categories":
         if column is None:
             raise ValueError("A column is required.")
+        if column == target:
+            raise ValueError(
+                "Rare-category grouping applies to a feature, not the target."
+            )
         threshold = float(value) if value is not None else 0.01
         shares = result[column].value_counts(
             normalize=True, dropna=True

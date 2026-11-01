@@ -65,6 +65,22 @@ def _metric_change(before: float, after: float) -> dict[str, float]:
     }
 
 
+def _held_out_rows_match(
+    previous: dict[str, Any],
+    current: dict[str, Any],
+) -> bool | None:
+    """Return whether both runs scored the same held-out rows, in order.
+
+    ``None`` means an older record did not store row ids. A stored mismatch
+    means the bootstrap replicates are not paired.
+    """
+    previous_indices = previous.get("test_indices") or None
+    current_indices = current.get("test_indices") or None
+    if previous_indices is None or current_indices is None:
+        return None
+    return list(previous_indices) == list(current_indices)
+
+
 def _bootstrap_change(
     previous: dict[str, Any],
     current: dict[str, Any],
@@ -75,6 +91,7 @@ def _bootstrap_change(
     if (
         previous_bootstrap.get("seed") != current_bootstrap.get("seed")
         or previous.get("test_rows") != current.get("test_rows")
+        or _held_out_rows_match(previous, current) is False
     ):
         return None
     before = np.asarray(previous_bootstrap.get(metric, []), dtype=float)
@@ -107,6 +124,7 @@ def compare_runs(
     ]
     previous_columns = set(previous["columns"])
     current_columns = set(current["columns"])
+    held_out_rows_match = _held_out_rows_match(previous, current)
     facts = {
         "actions": actions,
         "columns_added": sorted(current_columns - previous_columns),
@@ -152,18 +170,29 @@ def compare_runs(
             previous["macro_f1"], current["macro_f1"]
         ),
         "roc_auc": None,
+        "roc_auc_note": None,
+        "held_out_rows_match": held_out_rows_match,
         "metric_wobble": {
             "accuracy": _bootstrap_change(previous, current, "accuracy"),
             "macro_f1": _bootstrap_change(previous, current, "macro_f1"),
         },
     }
+    previous_positive = previous.get("roc_auc_positive_class")
+    current_positive = current.get("roc_auc_positive_class")
     if (
         previous.get("roc_auc") is not None
         and current.get("roc_auc") is not None
     ):
-        facts["roc_auc"] = _metric_change(
-            previous["roc_auc"], current["roc_auc"]
-        )
+        if previous_positive == current_positive:
+            facts["roc_auc"] = _metric_change(
+                previous["roc_auc"], current["roc_auc"]
+            )
+        else:
+            facts["roc_auc_note"] = (
+                "ROC-AUC was not compared because the runs do not use "
+                f"the same positive class ({previous_positive} and "
+                f"{current_positive})."
+            )
     facts["caption"] = interpretation_caption(
         previous, current, actions, facts
     )

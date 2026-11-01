@@ -1,7 +1,9 @@
+import numpy as np
 import pandas as pd
 import pytest
 
-from notebooks.model_training import train_model
+from data_doctor.report import compare_runs
+from notebooks.model_training import _slice_diagnostics, train_model
 
 
 def _demo_table() -> pd.DataFrame:
@@ -186,8 +188,157 @@ def test_numeric_constant_replay_preserves_numeric_dtype():
 
 
 def test_roc_auc_names_its_positive_class():
+    df = _demo_table()
+    first = train_model(df, "label", seed=3)
+    second = train_model(df, "label", seed=3, class_weight="balanced")
+    positive = first["metrics"]["roc_auc_positive_class"]
+    model = first["pipeline"].named_steps["model"]
+    assert positive == str(model.classes_[1])
+    assert second["metrics"]["roc_auc_positive_class"] == positive
+
+
+def test_conflicting_label_rows_stay_in_the_held_out_split():
+    features = list(range(80)) + list(range(20))
+    labels = ["yes" if index % 2 == 0 else "no" for index in range(80)]
+    labels += ["no" if index % 2 == 0 else "yes" for index in range(20)]
+    df = pd.DataFrame({"feature": features, "label": labels})
+    preserved = False
+    removed_from_train = False
+    for seed in range(6):
+        baseline = train_model(df, "label", seed=seed)
+        cleaned = train_model(
+            df,
+            "label",
+            seed=seed,
+            actions=[{"action": "drop_conflicting_rows"}],
+        )
+        assert cleaned["test_indices"] == baseline["test_indices"]
+        test = df.loc[cleaned["test_indices"]]
+        counts = test.groupby("feature")["label"].nunique()
+        conflicted = counts[counts > 1]
+        if not conflicted.empty:
+            preserved = True
+            feature = conflicted.index[0]
+            assert set(
+                test.loc[test["feature"].eq(feature), "label"]
+            ) == {"yes", "no"}
+        if (
+            cleaned["train_rows_after_cleaning"]
+            < cleaned["train_rows_before"]
+        ):
+            removed_from_train = True
+    assert preserved
+    assert removed_from_train
+
+
+def test_bootstrap_comparison_pairs_the_same_held_out_rows():
+    df = _demo_table()
+    df.loc[:15, "numeric"] = None
+    first = train_model(df, "label", seed=5)
+    second = train_model(
+        df,
+        "label",
+        seed=5,
+        actions=[{"action": "drop_rows_missing", "column": "numeric"}],
+    )
+    assert first["test_indices"] == second["test_indices"]
+
+    def record(result: dict, position: int) -> dict:
+        return {
+            "action_log_position": position,
+            "columns": result["columns"],
+            "train_rows_after": result["train_rows_after"],
+            "train_rows_after_cleaning": result[
+                "train_rows_after_cleaning"
+            ],
+            "test_rows": result["test_rows"],
+            "test_indices": result["test_indices"],
+            "accuracy": result["metrics"]["accuracy"],
+            "macro_f1": result["metrics"]["macro_f1"],
+            "roc_auc": result["metrics"]["roc_auc"],
+            "roc_auc_positive_class": result["metrics"][
+                "roc_auc_positive_class"
+            ],
+            "bootstrap_metrics": result["bootstrap_metrics"],
+            "class_weight": None,
+            "sampling": None,
+        }
+
+    comparison = compare_runs(
+        record(first, 0),
+        record(second, 1),
+        [{"action": "drop_rows_missing", "column": "numeric"}],
+    )
+    before = np.asarray(first["bootstrap_metrics"]["accuracy"], dtype=float)
+    after = np.asarray(second["bootstrap_metrics"]["accuracy"], dtype=float)
+    lower, upper = np.quantile(after - before, [0.025, 0.975])
+    assert comparison["held_out_rows_match"] is True
+    assert comparison["metric_wobble"]["accuracy"]["lower"] == pytest.approx(
+        float(lower)
+    )
+    assert comparison["metric_wobble"]["accuracy"]["upper"] == pytest.approx(
+        float(upper)
+    )
+
+    mismatched = record(second, 1)
+    mismatched["test_indices"] = list(reversed(mismatched["test_indices"]))
+    assert mismatched["test_indices"] != first["test_indices"]
+    withheld = compare_runs(record(first, 0), mismatched, [])
+    assert withheld["metric_wobble"]["accuracy"] is None
+    assert withheld["held_out_rows_match"] is False
+
+
+def test_slice_diagnostics_guard_small_groups_and_thin_classes():
+    features = pd.DataFrame(
+        {
+            "region": (
+                ["north"] * 40 + ["south"] * 20 + ["solo"] * 12 + ["tiny"] * 8
+            ),
+            "kind": ["mixed"] * 60 + ["solo"] * 20,
+            "wide": [f"v{index % 21}" for index in range(80)],
+        }
+    )
+    labels = pd.Series(
+        ["yes", "no"] * 20
+        + ["yes"] * 19
+        + ["no"]
+        + ["yes"] * 12
+        + ["yes"] * 8
+    )
+    rows = _slice_diagnostics(features, labels, np.array(["yes"] * 80))
+    by_key = {(row["column"], row["value"]): row for row in rows}
+    assert ("region", "tiny") not in by_key
+    assert all(row["column"] != "wide" for row in rows)
+
+    north = by_key[("region", "north")]
+    assert north["macro_f1"] is not None
+    assert north["class_count"] == 2
+    south = by_key[("region", "south")]
+    assert south["support"] >= 10
+    assert south["macro_f1"] is None
+    assert south["smallest_class_count"] == 1
+    assert "fewer than 5" in south["note"]
+    solo = by_key[("region", "solo")]
+    assert solo["class_count"] == 1
+    assert solo["macro_f1"] is None
+    assert "Only one target class" in solo["note"]
+    assert solo["accuracy"] == 1
+
+
+def test_feature_relevance_uses_scaled_and_encoded_columns():
     result = train_model(_demo_table(), "label")
-    assert result["metrics"]["roc_auc_positive_class"] in {"yes", "no"}
+    preprocessor = result["pipeline"].named_steps["preprocessor"]
+    scaler = preprocessor.named_transformers_["numeric"].named_steps[
+        "scaler"
+    ]
+    encoder = preprocessor.named_transformers_["categorical"].named_steps[
+        "encoder"
+    ]
+    assert scaler.mean_.shape == (1,)
+    assert scaler.n_features_in_ == 1
+    assert list(encoder.categories_[0]) == ["blue", "green", "red"]
+    assert set(result["feature_relevance"]) == {"numeric", "category"}
+    assert sum(result["feature_relevance"].values()) == pytest.approx(1)
 
 
 def test_explicit_date_conversion_remains_trainable():

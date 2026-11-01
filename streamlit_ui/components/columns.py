@@ -1,4 +1,4 @@
-"""Per-column analysis cards and pagination."""
+"""Per-column analysis cards with inline visualizations and pagination."""
 
 from typing import Any
 
@@ -13,6 +13,18 @@ from streamlit_ui.actions import (
 from streamlit_ui.components.common import highest_severity, render_severity
 from streamlit_ui.config import SEVERITY_ORDER
 from streamlit_ui.state import apply_working_action
+from streamlit_ui.visualizations.categorical_charts import (
+    compact_frequency_chart,
+    detail_frequency_chart,
+)
+from streamlit_ui.visualizations.numeric_charts import (
+    compact_histogram,
+    detail_histogram,
+)
+from streamlit_ui.visualizations.target_analysis import (
+    categorical_target_distribution,
+    numeric_target_distribution,
+)
 
 
 def render_column_grid(
@@ -35,7 +47,7 @@ def render_column_grid(
         )
     st.caption(
         "Each card keeps the column facts, detected problems, severity, "
-        "and available actions together."
+        "and available actions together. Click 'View details' for charts."
     )
     original_order = {
         column: index for index, column in enumerate(df.columns)
@@ -122,7 +134,7 @@ def _render_column_card(
         if option["column"] == column
     }
 
-    with st.container(border=True, height=690):
+    with st.container(border=True):
         relevance = (
             st.session_state.get("last_feature_relevance", {})
             if st.session_state.get("show_relevance_scores", False)
@@ -134,6 +146,11 @@ def _render_column_card(
         st.markdown(f"#### {column}{relevance_suffix}")
         st.caption("Target column" if column == target else str(series.dtype))
         _render_column_information(series, bool(id_finding))
+
+        # Compact chart preview (not for ID-like or target columns)
+        if not id_finding and column != target:
+            _render_compact_chart(series)
+
         _render_column_problems(issues)
         st.markdown(
             '<div class="dd-section-label">Severity</div>',
@@ -150,6 +167,74 @@ def _render_column_card(
             st.caption("Target labels can be reviewed but not dropped.")
         else:
             st.caption("No action is currently needed.")
+
+        # View details expander with full charts (lazy — only rendered when opened)
+        if column != target and not id_finding:
+            with st.expander("View details"):
+                _render_detail_charts(column, series, df, target)
+
+
+def _render_compact_chart(series: pd.Series) -> None:
+    """Render a small inline chart preview inside the column card."""
+    try:
+        if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 2:
+            chart = compact_histogram(series)
+        else:
+            chart = compact_frequency_chart(series)
+        st.altair_chart(chart, use_container_width=True)
+    except Exception:
+        # Never let a chart error break the card
+        pass
+
+
+def _render_detail_charts(
+    column: str,
+    series: pd.Series,
+    df: pd.DataFrame,
+    target: str,
+) -> None:
+    """Render full-size distribution chart + target-distribution chart."""
+    try:
+        if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 2:
+            st.altair_chart(
+                detail_histogram(series, column_name=column),
+                use_container_width=True,
+            )
+        else:
+            st.altair_chart(
+                detail_frequency_chart(series, column_name=column),
+                use_container_width=True,
+            )
+    except Exception:
+        pass
+
+    if target not in df.columns:
+        st.caption("Select a target column to see feature-vs-target charts.")
+        return
+
+    target_series = df[target]
+    st.markdown("**Target distribution**")
+    try:
+        if pd.api.types.is_numeric_dtype(series) and series.nunique(dropna=True) > 2:
+            chart = numeric_target_distribution(
+                series,
+                target_series,
+                feature_name=column,
+                target_name=target,
+            )
+        else:
+            chart = categorical_target_distribution(
+                series,
+                target_series,
+                feature_name=column,
+                target_name=target,
+            )
+        if chart is not None:
+            st.altair_chart(chart, use_container_width=True)
+        else:
+            st.caption("Not enough data to show a target distribution chart.")
+    except Exception:
+        st.caption("Target distribution chart unavailable for this column.")
 
 
 def _render_column_information(

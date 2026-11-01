@@ -6,6 +6,7 @@ import pandas as pd
 import streamlit as st
 
 from data_doctor.contracts import (
+    classify_comparison,
     compare_datasets,
     contract_json,
     infer_contract,
@@ -23,7 +24,7 @@ from streamlit_ui.components.dialogs import (
     render_training_results,
 )
 from streamlit_ui.data_sources import csv_bytes, read_uploaded_csv
-from streamlit_ui.state import reset_for_target
+from streamlit_ui.state import redo_step, reset_for_target, undo_step
 
 
 def render_control_panel(
@@ -81,6 +82,7 @@ def _render_training_controls(
         else:
             st.success("No high-severity warnings remain.")
         st.caption(f"{len(open_issues)} total detected issue(s) remain open.")
+
     strategy = st.selectbox(
         "Class imbalance option",
         [
@@ -97,13 +99,45 @@ def _render_training_controls(
         "Random oversample": "oversample",
         "Random undersample": "undersample",
     }.get(strategy)
+
+    # Positive-class selector for binary targets (used in training and dialog)
+    working = st.session_state.working_df
+    target_classes = sorted(
+        str(v) for v in working[selected_target].dropna().unique()
+    )
+    is_binary = len(target_classes) == 2
+    positive_class: str | None = None
+    if is_binary:
+        stored_pc = st.session_state.get("positive_class")
+        default_idx = (
+            target_classes.index(stored_pc)
+            if stored_pc in target_classes
+            else 1
+        )
+        positive_class = st.selectbox(
+            "Positive class (binary)",
+            target_classes,
+            index=default_idx,
+            help=(
+                "The class treated as 'positive' for Precision, Recall, "
+                "F1, ROC-AUC, and PR-AUC. Defaults to the second sorted class."
+            ),
+        )
+        st.session_state.positive_class = positive_class
+
     if st.button(
         "Train Logistic Regression",
         type="primary",
         key="train_model_button",
         use_container_width=True,
     ):
-        _train(selected_target, findings, class_weight, sampling)
+        _train(
+            selected_target,
+            findings,
+            class_weight,
+            sampling,
+            positive_class=positive_class,
+        )
 
     result_available = st.session_state.latest_training_result is not None
     if st.button(
@@ -135,6 +169,7 @@ def _train(
     findings: list[Finding],
     class_weight: str | None,
     sampling: str | None,
+    positive_class: str | None = None,
 ) -> None:
     try:
         with st.spinner("Training…"):
@@ -144,6 +179,7 @@ def _train(
                 class_weight=class_weight,
                 sampling=sampling,
                 actions=st.session_state.action_log,
+                positive_class=positive_class,
             )
         record = build_run_record(
             result,
@@ -166,6 +202,31 @@ def _render_working_data_controls(
     selected_target: str,
     findings: list[Finding],
 ) -> None:
+    st.divider()
+    st.markdown("**History**")
+
+    undo_stack = st.session_state.get("undo_stack", [])
+    redo_stack = st.session_state.get("redo_stack", [])
+    undo_col, redo_col = st.columns(2)
+    with undo_col:
+        if st.button(
+            f"↩ Undo ({len(undo_stack)})",
+            disabled=len(undo_stack) == 0,
+            use_container_width=True,
+            help="Restore the dataset to the state before the last action.",
+        ):
+            undo_step()
+            st.rerun()
+    with redo_col:
+        if st.button(
+            f"↪ Redo ({len(redo_stack)})",
+            disabled=len(redo_stack) == 0,
+            use_container_width=True,
+            help="Reapply the most recently undone action.",
+        ):
+            redo_step()
+            st.rerun()
+
     st.divider()
     st.markdown("**Working data**")
     st.download_button(
@@ -219,6 +280,12 @@ def _render_dataset_comparison(contract: dict) -> None:
             type=["csv"],
             key="comparison_upload",
         )
+        st.caption(
+            "Contract checks cover required columns, data types, allowed "
+            "categories, and missingness above the saved ceiling. A small "
+            "missingness change inside that ceiling is expected. "
+            "Distribution drift is reported separately."
+        )
         if comparison_upload is None:
             return
         try:
@@ -228,9 +295,14 @@ def _render_dataset_comparison(contract: dict) -> None:
                 st.session_state.working_df,
                 comparison_df,
             )
-            if not contract_issues and not drift:
+            sections = classify_comparison(contract_issues, drift)
+            if (
+                not contract_issues
+                and not sections["distribution"]
+                and not sections["unexpected_missingness"]
+            ):
                 st.success(
-                    "No contract violations or material drift signals "
+                    "No contract violations or distribution drift "
                     "were found."
                 )
             if contract_issues:
@@ -240,10 +312,17 @@ def _render_dataset_comparison(contract: dict) -> None:
                     hide_index=True,
                     width="stretch",
                 )
-            if drift:
-                st.markdown("**Drift signals**")
+            if sections["unexpected_missingness"]:
+                st.markdown("**Missingness outside the expected range**")
                 st.dataframe(
-                    pd.DataFrame(drift),
+                    pd.DataFrame(sections["unexpected_missingness"]),
+                    hide_index=True,
+                    width="stretch",
+                )
+            if sections["distribution"]:
+                st.markdown("**Distribution drift**")
+                st.dataframe(
+                    pd.DataFrame(sections["distribution"]),
                     hide_index=True,
                     width="stretch",
                 )

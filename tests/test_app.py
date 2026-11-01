@@ -29,6 +29,10 @@ def test_dashboard_starts_with_collapsed_preview_and_severity_order():
     assert headings.index("#### customerID") < headings.index(
         "#### gender"
     )
+    assert any(
+        "inside that ceiling is expected" in caption.value
+        for caption in app.caption
+    )
 
 
 def test_feature_column_moves_to_drop_list_with_one_click():
@@ -60,6 +64,11 @@ def test_feature_column_moves_to_drop_list_with_one_click():
     ).click().run(timeout=30)
 
     assert not app.multiselect
+    assert any(
+        "one-standard-deviation" in caption.value
+        and "Correlated columns" in caption.value
+        for caption in app.caption
+    )
     next(
         button
         for button in app.button
@@ -133,6 +142,15 @@ def test_training_result_unlocks_and_opens_in_dialog():
         "Accuracy",
         "Macro F1",
     }
+    assert any(
+        "ROC-AUC positive class: Yes" in caption.value
+        for caption in app.caption
+    )
+    assert any(
+        "Macro F1 is shown only" in caption.value
+        for caption in app.caption
+    )
+    assert not app.exception
 
 
 def test_readiness_is_tentative_and_impact_preview_is_absent():

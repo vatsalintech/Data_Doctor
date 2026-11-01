@@ -7,7 +7,7 @@ from data_doctor.report import (
     compare_runs,
     health_report_json,
 )
-from data_doctor.treatments import apply_action
+from data_doctor.treatments import apply_action, apply_actions_to_split
 
 
 def test_action_changes_copy_not_input():
@@ -107,6 +107,149 @@ def test_numeric_text_conversion_rejects_infinity():
             "convert_to_number",
             column="amount",
         )
+
+
+def test_conflicting_labels_are_dropped_from_training_rows_only():
+    x_train = pd.DataFrame({"feature": [1, 1, 2, 3, 3]})
+    y_train = pd.Series(["yes", "no", "yes", "yes", "yes"])
+    x_test = pd.DataFrame({"feature": [4, 4, 5]})
+    y_test = pd.Series(["yes", "no", "yes"])
+    actions = [{"action": "drop_conflicting_rows"}]
+
+    kept_train, kept_test, kept_y_train, kept_y_test = apply_actions_to_split(
+        x_train, x_test, y_train, y_test, "label", actions
+    )
+    assert list(zip(kept_train["feature"], kept_y_train)) == [
+        (2, "yes"),
+        (3, "yes"),
+        (3, "yes"),
+    ]
+    assert list(zip(kept_test["feature"], kept_y_test)) == [
+        (4, "yes"),
+        (4, "no"),
+        (5, "yes"),
+    ]
+
+    exact_train, exact_test, exact_y_train, exact_y_test = (
+        apply_actions_to_split(
+            x_train,
+            x_test,
+            y_train,
+            y_test,
+            "label",
+            [{"action": "drop_exact_duplicates"}],
+        )
+    )
+    assert len(exact_y_train) == len(y_train) - 1
+    assert list(zip(exact_test["feature"], exact_y_test)) == list(
+        zip(x_test["feature"], y_test)
+    )
+
+
+def test_outlier_caps_use_training_fences_not_logged_or_test_values():
+    x_train = pd.DataFrame({"amount": list(range(80))})
+    x_test = pd.DataFrame({"amount": [1000.0, 40.0, 41.0, 42.0]})
+    y_train = pd.Series(["yes", "no"] * 40)
+    y_test = pd.Series(["yes", "no", "yes", "no"])
+    _, capped_test, _, _ = apply_actions_to_split(
+        x_train,
+        x_test,
+        y_train,
+        y_test,
+        "label",
+        [
+            {
+                "action": "cap_outliers",
+                "column": "amount",
+                "details": {
+                    "lower_bound": -10_000,
+                    "upper_bound": 10_000,
+                },
+            }
+        ],
+    )
+    q1, q3 = x_train["amount"].quantile([0.25, 0.75])
+    train_high = float(q3 + 1.5 * (q3 - q1))
+    full = pd.concat(
+        [x_train["amount"], x_test["amount"]], ignore_index=True
+    )
+    full_q1, full_q3 = full.quantile([0.25, 0.75])
+    full_high = float(full_q3 + 1.5 * (full_q3 - full_q1))
+
+    assert capped_test["amount"].iloc[0] == pytest.approx(train_high)
+    assert capped_test["amount"].iloc[0] < 1000
+    assert capped_test["amount"].iloc[0] != pytest.approx(full_high)
+
+
+def test_rare_grouping_does_not_change_labels_or_unseen_test_values():
+    frame = pd.DataFrame(
+        {
+            "color": ["red", "blue", "gold"],
+            "label": ["yes", "no", "yes"],
+        }
+    )
+    with pytest.raises(ValueError, match="target"):
+        apply_action(
+            frame,
+            "label",
+            "group_rare_categories",
+            column="label",
+        )
+
+    x_train = pd.DataFrame(
+        {"color": ["red"] * 50 + ["blue"] * 49 + ["gold"]}
+    )
+    x_test = pd.DataFrame({"color": ["red", "gold", "silver", "blue"]})
+    y_train = pd.Series(["yes", "no"] * 50)
+    y_test = pd.Series(["yes", "no", "yes", "no"])
+    grouped_train, grouped_test, grouped_y_train, grouped_y_test = (
+        apply_actions_to_split(
+            x_train,
+            x_test,
+            y_train,
+            y_test,
+            "label",
+            [
+                {
+                    "action": "group_rare_categories",
+                    "column": "color",
+                    "details": {"threshold": 0.02},
+                }
+            ],
+        )
+    )
+    assert grouped_y_train.tolist() == y_train.tolist()
+    assert grouped_y_test.tolist() == y_test.tolist()
+    assert grouped_train["color"].tolist().count("Other") == 1
+    assert grouped_test["color"].tolist() == [
+        "red",
+        "Other",
+        "silver",
+        "blue",
+    ]
+
+
+def test_run_comparison_skips_roc_auc_when_the_positive_class_differs():
+    previous = {
+        "action_log_position": 0,
+        "columns": ["x"],
+        "train_rows_after": 80,
+        "accuracy": 0.80,
+        "macro_f1": 0.70,
+        "roc_auc": 0.90,
+        "roc_auc_positive_class": "yes",
+    }
+    changed_class = {
+        **previous,
+        "roc_auc": 0.40,
+        "roc_auc_positive_class": "no",
+    }
+    same_class = {**previous, "roc_auc": 0.40}
+    mismatch = compare_runs(previous, changed_class, [])
+    match = compare_runs(previous, same_class, [])
+    assert mismatch["roc_auc"] is None
+    assert "positive class" in mismatch["roc_auc_note"]
+    assert match["roc_auc"]["change"] == pytest.approx(-0.50)
 
 
 def test_run_comparison_reports_facts():

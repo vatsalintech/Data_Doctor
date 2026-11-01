@@ -19,7 +19,7 @@ The unique part is the training history: baseline vs later runs, with a factual 
 - Never auto-clean. Show every applicable action. Apply only what the user selects.
 - Leakage and label checks are **warning signs**, not a general solver. Suspicious labels are flagged for review. Do not silently change labels.
 - One model: **Logistic Regression**. No model picker, no AutoML, no deep learning.
-- Feature relevance is available after training. Aggregate absolute Logistic Regression coefficients back to source columns, describe them as model influence rather than causation, and let the user explicitly drop selected columns.
+- Feature relevance is available after training. Aggregate absolute Logistic Regression coefficients back to source columns, describe them as model influence rather than causation, and let the user explicitly drop selected columns. Explain that numeric coefficients are on scaled columns, categorical influence adds up encoded categories, and correlated columns can share one pattern.
 - Do not call an LLM to decide issues or write suggestions. Rules decide. Templates explain.
 - Streamlit is the UI, built after the prototype script works.
 - Stack: Python 3.12, pandas, NumPy, scikit-learn, Streamlit.
@@ -121,8 +121,8 @@ Call this **Trainable raw**. Later runs are **Trainable raw + the extra cleaning
 ## Honest comparison rules
 
 1. Split first. Treat second.
-2. Fit anything learned from data (median, mode, scaler, encoder) on train only, then apply to test.
-3. Row and label operations (drop duplicates, drop outliers, drop missing-like label rows, explicitly recode a label, resample) happen on the **train** split only.
+2. Fit anything learned from data (median, mode, scaler, encoder, outlier fences, rare-category groupings) on train only, then apply to test. Rare-category grouping never rewrites the target. A test value that did not appear in training stays unchanged.
+3. Row and label operations (drop duplicates, drop conflicting-label rows, drop outliers, drop missing-like label rows, explicitly recode a label, resample) happen on the **train** split only. Conflicting-label rows that land in the held-out split stay there.
 4. The test set stays as close as possible to the original test split.
 5. Dropping a column, including a leaky or ID column, happens on both train and test. Rows stay the same.
 6. Same model, same seed, same metrics every run.
@@ -138,8 +138,10 @@ Always show accuracy, macro F1, and a confusion matrix. Add ROC-AUC for binary t
 For accuracy and macro F1, retain deterministic bootstrap samples from the
 test predictions. Between-run comparisons use paired samples to show a 95%
 range for the metric change and say whether the change is within normal
-test-set wobble. Do not describe an improvement or decline as meaningful when
-its bootstrap range includes zero.
+test-set wobble. Pair those samples only when both runs scored the same
+held-out rows; otherwise withhold the range. Compare ROC-AUC only when both
+runs use the same positive class. Do not describe an improvement or decline
+as meaningful when its bootstrap range includes zero.
 
 When classes are imbalanced, say that accuracy can look fine while macro F1 is poor.
 
@@ -300,16 +302,23 @@ and reset controls available.
   cards are paginated. The uploader warns that large files can take a few
   minutes to train.
 - Training warnings name unseen test labels, convergence problems, and the
-  positive class used for binary ROC-AUC.
+  positive class used for binary ROC-AUC. That class is the second entry in
+  the model's sorted class list, and each run records it.
 
 ## v2 data intervention lab
 
 - **Slice diagnostics** report accuracy and macro F1 only for categorical test
-  groups with sufficient support. Present them as inspection signals, not
-  fairness or causal conclusions.
+  groups with sufficient support. Hide groups that are too small. Omit macro
+  F1 unless every target class has enough rows inside the group. Present the
+  remaining numbers as inspection signals, not fairness or causal conclusions.
 - **Dataset comparison** validates a new CSV against the inferred contract and
   reports schema, missingness, categorical-distribution, and numeric PSI drift
-  signals. It remains rule/statistics based.
+  signals. It remains rule/statistics based. Missingness ceilings include a
+  small cushion and stay below 100% unless the reference column is already
+  fully missing; a change inside that cushion is expected, not drift. Schema
+  breaks remain contract findings. PSI bins come from the reference column.
+  When those bins collapse, compare the observed values instead. Empty bins
+  use a tiny positive share so the score stays finite.
 - These features do not change the one-model decision. No AutoML or model
   marketplace is added.
 

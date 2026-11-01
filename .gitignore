@@ -23,6 +23,10 @@ env/
 .DS_Store
 .idea/
 
+# Files
+decisions.md
+flow.md
+
 # Datasets
 data/Original/creditcard.csv
 data/Messy/creditcard_messy.csv
