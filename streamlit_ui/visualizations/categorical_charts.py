@@ -69,8 +69,9 @@ def _colour_scale(df: pd.DataFrame) -> alt.Scale:
 def frequency_chart(
     series: pd.Series,
     *,
-    height: int = COMPACT_HEIGHT,
+    height: int = DETAIL_HEIGHT,
     title: str = "",
+    column_name: str = "",
     top_n: int = TOP_N,
 ) -> alt.Chart:
     """Return a horizontal bar chart of category frequencies."""
@@ -83,6 +84,7 @@ def frequency_chart(
         )
 
     colour_scale = _colour_scale(df)
+    calculated_height = max(180, len(df) * 26 + 35)
     chart = (
         alt.Chart(df)
         .mark_bar(cornerRadiusTopRight=3, cornerRadiusBottomRight=3)
@@ -90,10 +92,20 @@ def frequency_chart(
             y=alt.Y(
                 "category:N",
                 sort="-x",
-                title=None,
-                axis=alt.Axis(labelLimit=120, labelOverlap=False),
+                title=column_name or "Category",
+                axis=alt.Axis(
+                    labelLimit=160,
+                    labelOverlap=False,
+                    labelFontSize=10,
+                    titleFontSize=11,
+                    labelPadding=6,
+                ),
             ),
-            x=alt.X("count:Q", title="Count"),
+            x=alt.X(
+                "count:Q",
+                title="Row Count",
+                axis=alt.Axis(labelFontSize=10, titleFontSize=11),
+            ),
             color=alt.Color(
                 "category:N",
                 scale=colour_scale,
@@ -105,7 +117,7 @@ def frequency_chart(
                 alt.Tooltip("pct:Q", title="Share", format=".1%"),
             ],
         )
-        .properties(height=max(height, len(df) * 18 + 20), title=title or "")
+        .properties(height=calculated_height, title=title or "")
     )
     return chart
 
@@ -119,5 +131,6 @@ def detail_frequency_chart(series: pd.Series, column_name: str = "") -> alt.Char
         series,
         height=DETAIL_HEIGHT,
         top_n=TOP_N,
+        column_name=column_name,
         title=f"{column_name} — top categories" if column_name else "Top categories",
     )

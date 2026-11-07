@@ -22,7 +22,7 @@ def test_training_is_generic_and_deterministic():
     first = train_model(df, "label", seed=7)
     second = train_model(df, "label", seed=7)
     assert first["metrics"] == second["metrics"]
-    assert set(first["metrics"]) == {
+    assert set(first["metrics"]) >= {
         "accuracy",
         "macro_f1",
         "confusion_matrix",

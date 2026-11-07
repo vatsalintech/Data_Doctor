@@ -31,7 +31,7 @@ def render_control_panel(
     target_options: list[str],
     findings: list[Finding],
 ) -> None:
-    with st.container(border=True):
+    with st.container(border=True, key="dashboard_controls_panel"):
         st.markdown(
             '<div class="control-title">Controls</div>',
             unsafe_allow_html=True,
@@ -59,32 +59,36 @@ def _render_training_controls(
     findings: list[Finding],
 ) -> None:
     st.divider()
-    st.markdown("**Model training**")
-    st.caption(
-        "For trustworthy metrics, row fixes affect training rows only. "
-        "The working CSV applies your chosen cleaning to the full table."
-    )
     open_issues = [finding for finding in findings if finding.found]
     high_issues = [
         finding for finding in open_issues if finding.severity == "high"
     ]
-    with st.expander("Pre-train readiness"):
-        st.info(
-            "Checks passed so far. Final split and training checks run "
-            "when you start training."
-        )
-        if high_issues:
-            st.warning(
-                f"{len(high_issues)} high-severity warning(s) remain. "
-                "Training is allowed because warnings never auto-block "
-                "a user choice."
-            )
-        else:
-            st.success("No high-severity warnings remain.")
-        st.caption(f"{len(open_issues)} total detected issue(s) remain open.")
+    warning_text = (
+        f"{len(high_issues)} high-severity warning(s) remain. Training is "
+        "allowed because warnings never auto-block a user choice."
+        if high_issues
+        else "No high-severity warnings remain."
+    )
+    training_help = (
+        "For trustworthy metrics, row fixes affect training rows only. "
+        "The working CSV applies your chosen cleaning to the full table.\n\n"
+        "**Pre-train readiness:**\n\n"
+        "- Checks passed so far. Final split and training checks run when you start training.\n"
+        f"- {warning_text}\n"
+        f"- {len(open_issues)} total detected issue(s) remain open."
+    )
+    st.markdown("**Model training**", help=training_help)
+
+    # Imbalance and positive class selectors (stacked one below another)
+    working = st.session_state.working_df
+    target_classes = sorted(
+        str(v) for v in working[selected_target].dropna().unique()
+    )
+    is_binary = len(target_classes) == 2
+    positive_class: str | None = None
 
     strategy = st.selectbox(
-        "Class imbalance option",
+        "Class imbalance",
         [
             "None",
             'class_weight="balanced"',
@@ -92,21 +96,7 @@ def _render_training_controls(
             "Random undersample",
         ],
     )
-    class_weight = (
-        "balanced" if strategy == 'class_weight="balanced"' else None
-    )
-    sampling = {
-        "Random oversample": "oversample",
-        "Random undersample": "undersample",
-    }.get(strategy)
 
-    # Positive-class selector for binary targets (used in training and dialog)
-    working = st.session_state.working_df
-    target_classes = sorted(
-        str(v) for v in working[selected_target].dropna().unique()
-    )
-    is_binary = len(target_classes) == 2
-    positive_class: str | None = None
     if is_binary:
         stored_pc = st.session_state.get("positive_class")
         default_idx = (
@@ -115,7 +105,7 @@ def _render_training_controls(
             else 1
         )
         positive_class = st.selectbox(
-            "Positive class (binary)",
+            "Positive class",
             target_classes,
             index=default_idx,
             help=(
@@ -125,11 +115,19 @@ def _render_training_controls(
         )
         st.session_state.positive_class = positive_class
 
+    class_weight = (
+        "balanced" if strategy == 'class_weight="balanced"' else None
+    )
+    sampling = {
+        "Random oversample": "oversample",
+        "Random undersample": "undersample",
+    }.get(strategy)
+
     if st.button(
         "Train Logistic Regression",
         type="primary",
         key="train_model_button",
-        use_container_width=True,
+        width="stretch",
     ):
         _train(
             selected_target,
@@ -144,13 +142,13 @@ def _render_training_controls(
         "Training result",
         key="training_result_button",
         disabled=not result_available,
-        use_container_width=True,
+        width="stretch",
     ):
         render_training_results()
     if st.button(
         "Feature relevance",
         disabled=not result_available,
-        use_container_width=True,
+        width="stretch",
     ):
         render_feature_relevance()
     if not st.session_state.run_history:
@@ -212,7 +210,7 @@ def _render_working_data_controls(
         if st.button(
             f"↩ Undo ({len(undo_stack)})",
             disabled=len(undo_stack) == 0,
-            use_container_width=True,
+            width="stretch",
             help="Restore the dataset to the state before the last action.",
         ):
             undo_step()
@@ -221,7 +219,7 @@ def _render_working_data_controls(
         if st.button(
             f"↪ Redo ({len(redo_stack)})",
             disabled=len(redo_stack) == 0,
-            use_container_width=True,
+            width="stretch",
             help="Reapply the most recently undone action.",
         ):
             redo_step()
@@ -234,7 +232,7 @@ def _render_working_data_controls(
         csv_bytes(st.session_state.working_df),
         file_name="datadoctor_working.csv",
         mime="text/csv",
-        use_container_width=True,
+        width="stretch",
     )
     report = build_health_report(
         st.session_state.working_df,
@@ -243,23 +241,28 @@ def _render_working_data_controls(
         st.session_state.action_log,
         st.session_state.run_history,
     )
-    st.download_button(
-        "Download data health report",
-        health_report_json(report),
-        file_name="datadoctor_health_report.json",
-        mime="application/json",
-        use_container_width=True,
-    )
     contract = infer_contract(st.session_state.working_df, selected_target)
-    st.download_button(
-        "Download dataset contract",
-        contract_json(contract),
-        file_name="datadoctor_contract.json",
-        mime="application/json",
-        use_container_width=True,
-    )
+    dl_col1, dl_col2 = st.columns(2)
+    with dl_col1:
+        st.download_button(
+            "Health report",
+            health_report_json(report),
+            file_name="datadoctor_health_report.json",
+            mime="application/json",
+            width="stretch",
+            help="Download complete audit record and findings in JSON format.",
+        )
+    with dl_col2:
+        st.download_button(
+            "Contract",
+            contract_json(contract),
+            file_name="datadoctor_contract.json",
+            mime="application/json",
+            width="stretch",
+            help="Download inferred schema contract to validate future CSVs.",
+        )
     _render_dataset_comparison(contract)
-    if st.button("Reset to original", use_container_width=True):
+    if st.button("Reset to original", width="stretch"):
         reset_for_target(selected_target)
         st.rerun()
     if st.session_state.action_log:
@@ -331,7 +334,7 @@ def _render_dataset_comparison(contract: dict) -> None:
 
 
 def render_locked_target_panel(target_options: list[str]) -> None:
-    with st.container(border=True):
+    with st.container(border=True, key="dashboard_locked_target_panel"):
         st.markdown(
             '<div class="control-title">Controls</div>',
             unsafe_allow_html=True,
@@ -353,7 +356,7 @@ def render_recovery_panel(
     target_options: list[str],
     error: str,
 ) -> None:
-    with st.container(border=True):
+    with st.container(border=True, key="dashboard_recovery_panel"):
         st.markdown(
             '<div class="control-title">Recovery controls</div>',
             unsafe_allow_html=True,
@@ -374,12 +377,12 @@ def render_recovery_panel(
             csv_bytes(st.session_state.working_df),
             file_name="datadoctor_working.csv",
             mime="text/csv",
-            use_container_width=True,
+            width="stretch",
             key="recovery_download",
         )
         if st.button(
             "Reset to original",
-            use_container_width=True,
+            width="stretch",
             key="recovery_reset",
         ):
             reset_for_target(selected_target)

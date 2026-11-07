@@ -42,7 +42,7 @@ def _render_dataset_issue_card(
     finding: Finding,
     options: dict[str, dict[str, Any]],
 ) -> None:
-    with st.container(border=True, height=588):
+    with st.container(border=True, height=440):
         title = finding.issue_type.replace("_", " ").title()
         if finding.issue_type == "stored_as_text":
             title = f"Stored as text: {finding.scope}"
@@ -104,7 +104,7 @@ def _render_dataset_action(
     if st.button(
         "Apply",
         key=f"dataset_apply_{widget_suffix}",
-        use_container_width=True,
+        width="stretch",
     ):
         try:
             option = applicable[selected]
@@ -112,6 +112,14 @@ def _render_dataset_action(
                 option["action"],
                 column=option["column"],
             )
+            action_label = applicable[selected]["label"]
+            issue_title = finding.issue_type.replace("_", " ").title()
+            st.session_state["_last_action_success"] = (
+                f"**{action_label}** applied to dataset issue **{issue_title}**."
+            )
             st.rerun()
         except (ValueError, TypeError) as error:
-            st.error(str(error))
+            st.session_state["_last_action_error"] = (
+                f"Action failed on dataset issue: {error}"
+            )
+            st.rerun()

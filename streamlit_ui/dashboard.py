@@ -4,7 +4,12 @@ import streamlit as st
 
 from data_doctor.detectors import id_like_columns, prepare_data
 from streamlit_ui.actions import action_options
+from streamlit_ui.components.ai_understanding import (
+    render_ai_dataset_understanding_card,
+    render_ai_understanding_section,
+)
 from streamlit_ui.components.columns import render_column_grid
+from streamlit_ui.components.columns import render_priority_drop_warning
 from streamlit_ui.components.common import render_preview, render_vitals
 from streamlit_ui.components.controls import (
     render_control_panel,
@@ -72,7 +77,14 @@ def main() -> None:
     with main_column:
         render_vitals(working)
         render_preview(working)
+        render_ai_understanding_section(working, target=st.session_state.target)
+        render_priority_drop_warning(findings)
         render_dataset_issues(findings, options)
+
+    ai_result = st.session_state.get("ai_understanding_result")
+    if ai_result:
+        render_ai_dataset_understanding_card(ai_result)
+
     st.markdown("<div style='height:1rem'></div>", unsafe_allow_html=True)
     render_column_grid(
         working,
@@ -89,6 +101,10 @@ def _render_target_locked(working, target_options: list[str]) -> None:
     with main_column:
         render_vitals(working)
         render_preview(working)
+        render_ai_understanding_section(working, target=None)
+        ai_result = st.session_state.get("ai_understanding_result")
+        if ai_result:
+            render_ai_dataset_understanding_card(ai_result)
         st.info(
             "Choose the target column to unlock issue diagnosis, "
             "column analysis, and model training."
@@ -106,6 +122,7 @@ def _render_diagnosis_recovery(
     with main_column:
         render_vitals(working)
         render_preview(working)
+        render_ai_understanding_section(working, target=None)
         st.warning(
             "The working data cannot be diagnosed or trained in its "
             "current state. Change the target or reset to original."

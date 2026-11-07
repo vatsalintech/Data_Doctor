@@ -1,5 +1,6 @@
 # Python
 __pycache__/
+.pycache/
 *.py[cod]
 *.egg-info/
 .pytest_cache/
@@ -22,10 +23,11 @@ env/
 # OS and editor files
 .DS_Store
 .idea/
+.cursor/
 
-# Files
-decisions.md
-flow.md
+# Local notes
+Decisions.md
+Flow.md
 
 # Datasets
 data/Original/creditcard.csv

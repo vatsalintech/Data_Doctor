@@ -19,14 +19,44 @@ def build_run_record(
     action_log_position: int,
 ) -> dict[str, Any]:
     metrics = training_result["metrics"]
+    pos_class = metrics.get("positive_class") or metrics.get("roc_auc_positive_class")
+    per_class = metrics.get("per_class_metrics", [])
+
+    precision = None
+    recall = None
+    f1 = None
+    if per_class:
+        if pos_class is not None:
+            for p in per_class:
+                if str(p.get("class")) == str(pos_class):
+                    precision = p.get("precision")
+                    recall = p.get("recall")
+                    f1 = p.get("f1")
+                    break
+        if precision is None:
+            precision = metrics.get("macro_precision")
+            recall = metrics.get("macro_recall")
+            f1 = metrics.get("macro_f1")
+    else:
+        precision = metrics.get("macro_precision")
+        recall = metrics.get("macro_recall")
+        f1 = metrics.get("macro_f1")
+
     return {
         "run_number": 0,
         "accuracy": metrics["accuracy"],
+        "precision": precision,
+        "recall": recall,
+        "f1": f1,
         "macro_f1": metrics["macro_f1"],
+        "macro_precision": metrics.get("macro_precision"),
+        "macro_recall": metrics.get("macro_recall"),
         "roc_auc": metrics["roc_auc"],
         "roc_auc_positive_class": metrics.get(
             "roc_auc_positive_class"
         ),
+        "positive_class": pos_class,
+        "per_class_metrics": per_class,
         "confusion_matrix": metrics["confusion_matrix"],
         "labels": metrics["labels"],
         "train_rows_before": training_result["train_rows_before"],

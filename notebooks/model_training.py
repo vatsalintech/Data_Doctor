@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Literal, Optional
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -31,7 +31,7 @@ from sklearn.preprocessing import (
 from data_doctor.detectors import prepare_data
 from data_doctor.treatments import apply_actions_to_split
 
-Sampling = Optional[Literal["oversample", "undersample"]]
+Sampling = Literal["oversample", "undersample"] | None
 BOOTSTRAP_REPETITIONS = 400
 
 
@@ -220,6 +220,7 @@ def _build_pipeline(
                             OneHotEncoder(
                                 handle_unknown="ignore",
                                 sparse_output=True,
+                                max_categories=50,
                             ),
                         ),
                     ]
@@ -271,9 +272,14 @@ def _feature_relevance(
                 relevance[column] += float(score)
         elif name == "categorical":
             encoder = transformer.named_steps["encoder"]
+            n_outs = getattr(
+                encoder,
+                "_n_features_outs",
+                [len(c) for c in encoder.categories_],
+            )
             start = 0
-            for column, categories in zip(columns, encoder.categories_):
-                stop = start + len(categories)
+            for column, n_features in zip(columns, n_outs):
+                stop = start + n_features
                 relevance[column] += float(scores[start:stop].sum())
                 start = stop
 

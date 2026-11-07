@@ -360,3 +360,58 @@ def test_health_report_is_portable_json():
     assert report["dataset_fingerprint"]
     assert b'"target": "label"' in payload
 
+
+def test_assess_feature_target_relationship_leakage_and_id():
+    from streamlit_ui.visualizations.target_analysis import assess_feature_target_relationship
+    from data_doctor.detectors import Finding
+
+    findings = [
+        Finding(
+            issue_type="target_copy",
+            scope="leaky_col",
+            severity="high",
+            found=True,
+            evidence={},
+            suggested_action="drop_column",
+            reason="Reveals target.",
+        ),
+        Finding(
+            issue_type="id_like",
+            scope="id_col",
+            severity="low",
+            found=True,
+            evidence={},
+            suggested_action="drop_column",
+            reason="Unique identifier.",
+        ),
+    ]
+
+    target = pd.Series(["Yes", "No", "Yes", "No"] * 5)
+    leaky_col = target.copy()
+    id_col = pd.Series(range(20))
+
+    leaky_res = assess_feature_target_relationship(leaky_col, target, findings, "leaky_col", "target")
+    assert leaky_res["status"] == "Unsafe (Target Leakage)"
+    assert "No — Must Drop" in leaky_res["is_necessary"]
+
+    id_res = assess_feature_target_relationship(id_col, target, findings, "id_col", "target")
+    assert id_res["status"] == "Unsafe (Identifier)"
+    assert "No — Should Drop" in id_res["is_necessary"]
+
+
+def test_assess_feature_target_relationship_predictive_and_marginal():
+    from streamlit_ui.visualizations.target_analysis import assess_feature_target_relationship
+
+    target = pd.Series(["Yes"] * 20 + ["No"] * 20)
+    # Strong categorical feature: Category A has 100% Yes, Category B has 0% Yes
+    strong_cat = pd.Series(["A"] * 20 + ["B"] * 20)
+    strong_res = assess_feature_target_relationship(strong_cat, target, [], "strong_cat", "target")
+    assert strong_res["status"] == "High Importance"
+    assert "Critical" in strong_res["is_necessary"]
+
+    # Marginal categorical feature: 50% Yes in both categories
+    marginal_cat = pd.Series((["X", "Y"] * 20))
+    marginal_res = assess_feature_target_relationship(marginal_cat, target, [], "marginal_cat", "target")
+    assert marginal_res["status"] == "Low / Marginal"
+    assert "Marginal" in marginal_res["is_necessary"]
+

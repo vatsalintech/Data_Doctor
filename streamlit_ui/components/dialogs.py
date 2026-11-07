@@ -31,8 +31,10 @@ def render_training_results() -> None:
     if not history:
         return
     latest = history[-1]
-    metrics = latest.get("metrics", {})
-    is_binary = metrics.get("positive_class") is not None
+    result = st.session_state.latest_training_result
+    metrics = (result.get("metrics") if result else None) or latest.get("metrics") or latest
+    pos_class = metrics.get("positive_class") or metrics.get("roc_auc_positive_class")
+    is_binary = pos_class is not None
 
     st.subheader("Latest run results")
 
@@ -122,8 +124,8 @@ def render_training_results() -> None:
             ),
         )
         st.caption(
-            f"Positive class: **{metrics['positive_class']}** "
-            f"(support: {sum(1 for v in (result or {}).get('y_test', []) if str(v) == metrics['positive_class']):,} "
+            f"ROC-AUC positive class: {pos_class} "
+            f"(support: {sum(1 for v in (result or {}).get('y_test', []) if str(v) == pos_class):,} "
             f"of {len((result or {}).get('y_test', [])):,} test rows)"
         )
 
@@ -213,6 +215,9 @@ def render_training_results() -> None:
     visible = [
         "run_number",
         "accuracy",
+        "precision",
+        "recall",
+        "f1",
         "macro_f1",
         "roc_auc",
         "train_rows_before",
@@ -220,10 +225,34 @@ def render_training_results() -> None:
         "train_rows_after_sampling",
         "open_issue_count",
     ]
-    history_df = pd.DataFrame(history)
+    processed_history = []
+    for item in history:
+        row = dict(item)
+        if "precision" not in row or row["precision"] is None:
+            pc_list = row.get("per_class_metrics") or []
+            pc_target = row.get("positive_class") or row.get("roc_auc_positive_class")
+            if pc_list and pc_target:
+                for pc in pc_list:
+                    if str(pc.get("class")) == str(pc_target):
+                        row["precision"] = pc.get("precision")
+                        row["recall"] = pc.get("recall")
+                        row["f1"] = pc.get("f1")
+                        break
+            if "precision" not in row or row["precision"] is None:
+                row["precision"] = row.get("macro_precision")
+                row["recall"] = row.get("macro_recall")
+                row["f1"] = row.get("macro_f1")
+        processed_history.append(row)
+
+    history_df = pd.DataFrame(processed_history)
     available = [c for c in visible if c in history_df.columns]
+    format_dict = {
+        col: "{:.4f}"
+        for col in ["accuracy", "precision", "recall", "f1", "macro_f1", "roc_auc"]
+        if col in available
+    }
     st.dataframe(
-        history_df[available],
+        history_df[available].style.format(format_dict, na_rep="—"),
         hide_index=True,
         width="stretch",
     )
@@ -310,7 +339,7 @@ def _render_pr_curve(
         )
 
     st.markdown("**Precision-Recall curve**")
-    st.altair_chart(pr_chart, use_container_width=True)
+    st.altair_chart(pr_chart, width="stretch")
 
 
 def _render_run_comparison(history: list[dict[str, Any]]) -> None:
@@ -494,7 +523,7 @@ def _feature_button_grid(
                     help=f"Model influence: {relevance[column]:.2%}",
                     on_click=callback,
                     args=(column,),
-                    use_container_width=True,
+                    width="stretch",
                 )
 
 
@@ -553,7 +582,7 @@ def render_feature_relevance() -> None:
         .properties(height=chart_height)
         .configure_view(strokeWidth=0)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
     st.dataframe(
         relevance_table[["Column", "Influence %"]],
         hide_index=True,
@@ -604,15 +633,18 @@ def _render_feature_selection(relevance: dict[str, float]) -> None:
         "Save changes",
         type="primary",
         disabled=not selected,
-        use_container_width=True,
+        width="stretch",
     ):
         for column in selected:
             apply_working_action("drop_column", column=column)
+        st.session_state["_last_action_success"] = (
+            f"Dropped column(s): **{', '.join(selected)}**."
+        )
         st.rerun()
     if cancel_column.button(
         "Cancel",
         type="tertiary",
-        use_container_width=True,
+        width="stretch",
     ):
         st.session_state.feature_drop_selection = []
         st.rerun()

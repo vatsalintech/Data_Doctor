@@ -331,85 +331,20 @@ def build_adult() -> tuple[pd.DataFrame, dict[str, Any]]:
     return messy, metadata
 
 
-def build_creditcard() -> tuple[pd.DataFrame, dict[str, Any]]:
-    source = pd.read_csv(ORIGINAL_DIR / "creditcard.csv")
-    df = source.copy()
-    df.insert(
-        0, "transaction_id", _stable_source_ids(source, "TXN")
-    )
-    rng = np.random.default_rng(SEED + 2)
-
-    planted_missing = {
-        "V1": _set_missing(df, rng, "V1", 0.02),
-        "V14": _set_missing(df, rng, "V14", 0.03),
-        "Amount": _set_missing(df, rng, "Amount", 0.04),
-    }
-    _add_mostly_empty_column(
-        df, rng, "device_note", ["MOBILE", "DESKTOP", "REVIEW"]
-    )
-
-    used: set[int] = set()
-    outlier_plan = {
-        "Amount": (120, 9999999),
-        "V1": (100, -999),
-        "V14": (100, -999),
-    }
-    for column, (count, value) in outlier_plan.items():
-        chosen = _choose(rng, df.index, count, used)
-        df.loc[chosen, column] = value
-
-    messy = _finish_dataset(
-        df=df,
-        rng=rng,
-        target="Class",
-        target_copy="ClassCopy",
-        flip_mapping={0: 1, 1: 0},
-        exact_count=200,
-        conflict_count=80,
-        noisy_label_count=40,
-        used=used,
-    )
-    metadata = {
-        "source_file": "Original/creditcard.csv",
-        "output_file": "Messy/creditcard_messy.csv",
-        "target": "Class",
-        "id_column": "transaction_id",
-        "target_copy": "ClassCopy",
-        "source_rows": int(len(source)),
-        "source_exact_duplicate_extras": int(
-            source.duplicated().sum()
-        ),
-        "planted": {
-            "missing_requested": planted_missing,
-            "mostly_empty_column": "device_note",
-            "outliers": {
-                column: {"rows": count, "value": value}
-                for column, (count, value) in outlier_plan.items()
-            },
-            "exact_copies": 200,
-            "conflicting_label_copies": 80,
-            "noisy_label_flips": 40,
-            "synthetic_id": "transaction_id",
-        },
-        "observed": _observed_evidence(
-            messy, "Class", "ClassCopy", "transaction_id"
-        ),
-    }
-    return messy, metadata
-
-
 def main() -> None:
     MESSY_DIR.mkdir(parents=True, exist_ok=True)
     builders: list[
-        tuple[str, Callable[[], tuple[pd.DataFrame, dict[str, Any]]]]
+        tuple[str, Path, Callable[[], tuple[pd.DataFrame, dict[str, Any]]]]
     ] = [
-        ("telco_messy.csv", build_telco),
-        ("adult_messy.csv", build_adult),
-        ("creditcard_messy.csv", build_creditcard),
+        ("telco_messy.csv", ORIGINAL_DIR / "Telco-Customer-Churn.csv", build_telco),
+        ("adult_messy.csv", ORIGINAL_DIR / "adult.csv", build_adult),
     ]
     manifest: dict[str, Any] = {"seed": SEED, "datasets": {}}
 
-    for filename, builder in builders:
+    for filename, source_path, builder in builders:
+        if not source_path.exists():
+            print(f"Skipping {filename}: {source_path.name} not found.")
+            continue
         messy, metadata = builder()
         output_path = MESSY_DIR / filename
         messy.to_csv(output_path, index=False)

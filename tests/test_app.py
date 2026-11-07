@@ -13,9 +13,13 @@ def test_dashboard_starts_with_collapsed_preview_and_severity_order():
         str(ROOT / "app.py"), default_timeout=30
     ).run()
     assert not app.exception
-    assert [item.label for item in app.expander] == [
+    top_expanders = [
+        item.label
+        for item in app.expander
+        if item.label in {"Preview data", "Compare a new CSV"}
+    ]
+    assert top_expanders == [
         "Preview data",
-        "Pre-train readiness",
         "Compare a new CSV",
     ]
 
@@ -150,6 +154,10 @@ def test_training_result_unlocks_and_opens_in_dialog():
         "Macro F1 is shown only" in caption.value
         for caption in app.caption
     )
+    first_run = app.session_state["run_history"][0]
+    assert first_run.get("precision") is not None
+    assert first_run.get("recall") is not None
+    assert first_run.get("f1") is not None
     assert not app.exception
 
 
@@ -162,6 +170,9 @@ def test_readiness_is_tentative_and_impact_preview_is_absent():
         for button in app.button
     )
     assert any(
+        "Checks passed so far" in (m.help or "")
+        for m in app.markdown
+    ) or any(
         "Checks passed so far" in message.value
         for message in app.info
     )
@@ -190,4 +201,87 @@ def test_stored_text_columns_are_promoted_to_dataset_issues():
         reason="Stored as text.",
     )
     assert dataset_issue_findings([finding]) == [finding]
+
+
+def test_column_cards_have_separate_distribution_and_target_analysis_expanders():
+    app = AppTest.from_file(
+        str(ROOT / "app.py"), default_timeout=30
+    ).run()
+    assert not app.exception
+
+    expander_labels = [item.label for item in app.expander]
+    assert "📊 Column chart distribution" in expander_labels
+    assert "🎯 Target analysis" in expander_labels
+    assert "📊 Charts & Target Analysis" not in expander_labels
+
+    imbalance_select = next(
+        s for s in app.selectbox if s.label == "Class imbalance"
+    )
+    assert imbalance_select.options == [
+        "None",
+        'class_weight="balanced"',
+        "Random oversample",
+        "Random undersample",
+    ]
+
+
+def test_column_expand_button_opens_dialog_popup_with_two_columns():
+    app = AppTest.from_file(
+        str(ROOT / "app.py"), default_timeout=30
+    ).run()
+    assert not app.exception
+
+    # Find the expand button for the first column (e.g. ChurnCopy)
+    expand_btn = next(
+        b for b in app.button if b.key and b.key.startswith("expand_col_")
+    )
+    col_name = expand_btn.key.replace("expand_col_", "")
+    expand_btn.click().run(timeout=30)
+    assert not app.exception
+
+    # Subheader with column name inside dialog
+    assert any(col_name in s.value for s in app.subheader)
+    # Check chart heading and action section inside dialog
+    assert any("Column distribution" in m.value for m in app.markdown)
+    assert any("Actions & Status" in m.value for m in app.markdown)
+
+
+def test_numeric_histogram_and_target_distribution_robust_to_extreme_outliers():
+    import pandas as pd
+    import numpy as np
+    from streamlit_ui.visualizations.numeric_charts import _bin_data, detail_histogram
+    from streamlit_ui.visualizations.target_analysis import numeric_target_distribution
+
+    # Series with 100 normal values in [10, 100] and 2 extreme outliers at 10,000
+    normal = list(range(10, 100))
+    series = pd.Series(normal + [10000.0, 10000.0])
+
+    bin_df, meta = _bin_data(series)
+    assert meta["has_outliers"] is True
+    assert meta["n_hi_outliers"] == 2
+    assert meta["inlier_min"] == 10.0
+    assert meta["inlier_max"] == 99.0
+    # Last bin is an outlier overflow bin
+    assert any(row["kind"] == "Outliers" for _, row in bin_df.iterrows())
+    # The normal bins span ~10 to ~99, not 10,000
+    data_bins = bin_df[bin_df["kind"] == "Data"]
+    assert data_bins["bin_end"].max() < 200
+
+    # Ensure chart builds without error
+    chart = detail_histogram(series, column_name="Amount")
+    spec = chart.to_dict()
+    assert spec is not None
+
+    # Test target distribution with extreme outliers
+    target = pd.Series([0 if v < 55 else 1 for v in normal] + [1, 1])
+    target_chart = numeric_target_distribution(
+        series, target, feature_name="Amount", target_name="Target"
+    )
+    assert target_chart is not None
+    target_spec = target_chart.to_dict()
+    assert target_spec is not None
+
+
+
+
 

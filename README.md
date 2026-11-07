@@ -1,87 +1,216 @@
-# DataDoctor
+# DataDoctor 🩺
 
-DataDoctor is a beginner-friendly classification CSV health tool. It shows
-rule-based data issues, lets the user choose changes, and compares repeated
-Logistic Regression runs. It never auto-cleans the uploaded table.
+[![Python 3.12](https://img.shields.io/badge/Python-3.12-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Streamlit](https://img.shields.io/badge/Streamlit-1.39+-FF4B4B?logo=streamlit&logoColor=white)](https://streamlit.io/)
+[![scikit-learn](https://img.shields.io/badge/scikit--learn-1.5+-F7931E?logo=scikit-learn&logoColor=white)](https://scikit-learn.org/)
+[![Google Gemini](https://img.shields.io/badge/Gemini%20API-Flash%20Lite-8E75B2?logo=google&logoColor=white)](https://ai.google.dev/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-## Setup
+> **A rigorous, human-in-the-loop health inspection workbench and audit platform for tabular classification datasets.**
 
-Use Python 3.12.
+Most data cleaning tools fall into one of two extremes: passive static report generators (like Pandas Profiling) or dangerous black-box "auto-cleaners" that silently impute values, delete rows, and contaminate held-out test splits.
+
+**DataDoctor** takes a fundamentally different engineering approach: it acts as a **living working copy of your dataset**. It diagnoses issues using deterministic rule-based algorithms, surfaces actionable suggestions, applies only the atomic treatments you explicitly choose, and compares consecutive model runs with leakage-safe evaluation rules.
+
+---
+
+## 📸 Core Features & Highlights
+
+```
+       Raw / Messy CSV
+              │
+              ▼
+   ┌────────────────────────────────────────────────────────┐
+   │                  DataDoctor Workbench                  │
+   │                                                        │
+   │  ┌───────────────────────┐   ┌───────────────────────┐ │
+   │  │  Deterministic Rules  │   │  AI Understanding     │ │
+   │  │  7 Tabular Detectors  │   │  Gemini Semantic Map  │ │
+   │  └───────────┬───────────┘   └───────────┬───────────┘ │
+   │              │                           │             │
+   │              ▼                           ▼             │
+   │  ┌──────────────────────────────────────────────────┐  │
+   │  │   Interactive Dashboard & Atomic Interventions   │  │
+   │  └───────────────────────┬──────────────────────────┘  │
+   │                          │                             │
+   │                          ▼                             │
+   │  ┌──────────────────────────────────────────────────┐  │
+   │  │        Honest ML Pipeline & Model Auditing       │  │
+   │  │ • Group-Aware Split    • Train-Only Fits         │  │
+   │  │ • Bootstrap Range      • Feature Relevance       │  │
+   │  └──────────────────────────────────────────────────┘  │
+   └────────────────────────────────────────────────────────┘
+              │                               │
+              ▼                               ▼
+       Cleaned Working CSV            Portable JSON Contract
+        (Always Exportable)            & PSI Drift Monitor
+```
+
+### 1. Honest ML Evaluation Rules
+- **Split First, Treat Second**: Transformers (scalers, encoders, median imputers) and row-level cleaning operations (outlier clipping, row drops, balancing) are learned strictly on the **training split**, leaving the test split clean and unpolluted.
+- **Group-Aware Splitting**: Identical feature rows are automatically constrained to one side of the split to guarantee zero duplicate leakage between train and test.
+- **Paired Bootstrap Check (400 Repetitions)**: Resamples the same held-out rows 400 times and shows a 95% range for the change in accuracy and macro F1. When that range includes zero, the app calls the change normal test-set wobble.
+
+### 2. 7 Deterministic Anomaly Detectors
+- **Missing Values**: Quantifies missing rates per column and suggests median/mode imputation, constant filling, or column pruning.
+- **Exact & Conflicting Duplicates**: Identifies identical records and highlights conflicting-label rows for manual review.
+- **Outliers (IQR Fences)**: Flags numerical outliers and suggests bounding/capping before dropping rows.
+- **Class Imbalance**: Computes class ratios and provides training-only interventions (`class_weight="balanced"`, random oversampling, random undersampling).
+- **Suspicious Labels**: Detects rare classes, near-constant labels, and missing-like strings (`unknown`, `???`, `-1`, blanks) with targeted recoding tools.
+- **Target Leakage & ID Columns**: Flags columns identical to the target, high-lift target proxies, and high-cardinality IDs.
+- **Features Stored as Text**: Safely parses numeric/datetime values mistakenly encoded as strings and provides explicit 1-click conversions.
+
+### 3. Model Influence & Feature Relevance
+- Aggregates absolute Logistic Regression coefficients back to their source columns.
+- Visualizes model influence on a 0–1 scale. The chart describes association inside this model, and the user can drop a selected column with one click.
+
+### 4. Dataset Contracts and Drift Checks
+- Exports a JSON contract capturing column types, missingness ceilings, and category bounds.
+- Checks a later CSV against that contract, including a **Population Stability Index (PSI)** comparison for numeric columns.
+
+### 5. Decoupled AI Understanding Layer
+- Integrates Google Gemini (`gemini-flash-lite-latest`) to provide plain-language domain summaries, business context, and column semantic roles.
+- **Strictly Separated**: Rules and math diagnose and clean data; the LLM strictly explains domain context.
+- **Offline fallback**: With no API key, the app uses a built-in mock and does not call Gemini. Diagnosis and training keep working.
+
+---
+
+## 🛠️ Tech Stack
+
+| Layer | Technologies |
+| :--- | :--- |
+| **Language** | Python 3.12 |
+| **Core Libraries** | pandas, NumPy, scikit-learn |
+| **Frontend / UI** | Streamlit, Altair, HTML/CSS |
+| **LLM Semantic Layer** | Google Gemini API via `requests`, Pydantic v2 |
+| **Testing** | pytest, Streamlit AppTest framework |
+
+---
+
+## 🚀 Getting Started
+
+### Prerequisites
+- Python 3.12 installed.
+
+### 1. Clone & Setup Virtual Environment
 
 ```bash
-python3 -m venv .venv
+git clone https://github.com/vatsalintech/Data_Doctor.git
+cd Data_Doctor
+
+# Create a virtual environment
+python3.12 -m venv .venv
 source .venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-## Rebuild the demo data
+### 2. (Optional) Configure Gemini API Key
 
-Original files under `data/Original/` are never modified.
+DataDoctor works out of the box with offline mock summaries. To enable live Gemini AI domain insights:
+
+**Option A — Environment Variable:**
+```bash
+export GEMINI_API_KEY="your-gemini-api-key"
+```
+
+**Option B — Streamlit Secrets:**
+```bash
+cp .streamlit/secrets.toml.example .streamlit/secrets.toml
+```
+Open `.streamlit/secrets.toml` and paste your key:
+```toml
+GEMINI_API_KEY = "your-gemini-api-key"
+GEMINI_MODEL = "gemini-flash-lite-latest"
+```
+*(Note: `.streamlit/secrets.toml` is included in `.gitignore` and is never committed to Git).*
+
+### 3. Launch the Application
+
+```bash
+streamlit run app.py
+```
+Open [http://localhost:8501](http://localhost:8501) in your browser.
+
+The demo menu provides two built-in demo datasets: **Telco Customer Churn** and **Adult Census Income** (located in `data/Messy/`). Rebuilding them from the immutable originals in `data/Original/` is optional:
 
 ```bash
 python data/build_messy_datasets.py
 ```
 
-The script writes three deterministic files and an issue manifest under
-`data/Messy/`:
+---
 
-- `telco_messy.csv` — target `Churn`
-- `adult_messy.csv` — target `income`
-- `creditcard_messy.csv` — target `Class`
+## ☁️ Deployment Guide (Streamlit Community Cloud)
 
-## Run the detector prototype
+1. **Deploy on Streamlit Community Cloud**:
+   - Go to [share.streamlit.io](https://share.streamlit.io/) and select **New app**.
+   - Select this repository and the `main` branch.
+   - Set **Main file path** to `app.py`.
+   - Python 3.12 is selected from `runtime.txt`.
+2. **Configure Secrets** (optional):
+   - In your app settings on Streamlit Cloud, go to **Settings** $\to$ **Secrets**.
+   - Add your secret configuration:
+     ```toml
+     GEMINI_API_KEY = "your-actual-api-key"
+     GEMINI_MODEL = "gemini-flash-lite-latest"
+     ```
+   - *Security Note*: Secrets are encrypted server-side and never exposed to the client browser.
 
-```bash
-python notebooks/prototype.py
-python notebooks/prototype.py data/Messy/adult_messy.csv --target income
-python notebooks/prototype.py data/Messy/creditcard_messy.csv --target Class
-```
+> [!NOTE]
+> **Free Cloud Resource Guidelines**:
+> The 10 MB upload cap, 50,000-row ceiling, and 8-step undo history exist because Streamlit Community Cloud’s free tier has about 1 GB of RAM. They are hosting limits, not a limit of the diagnosis or training logic. On that free tier, datasets under **20,000 rows** stay responsive.
 
-## Run model training directly
+---
 
-```bash
-python notebooks/model_training.py
-```
+## 🧪 Testing & Verification
 
-The callable used by the app is:
-
-```python
-from notebooks.model_training import train_model
-
-result = train_model(df, target="your_target_column")
-```
-
-Missing-value imputation, category encoding, and numeric scaling are learned
-from training rows only. They do not change the downloadable working CSV.
-
-## Run the app
+Tests cover detectors, treatments, the bootstrap check, contracts, Streamlit interactions, and the AI fallback. Run them locally:
 
 ```bash
-streamlit run app.py
+pytest
 ```
 
-The app supports upload or demo selection, target selection, diagnosis,
-explicit treatments, working-copy download/reset, optional training-only
-balancing, saved runs, and between-run comparisons.
+---
 
-It also provides:
+## 📁 Repository Structure
 
-- leakage-safe, repeatable train/test splits that keep duplicate feature
-  groups together
-- bootstrap checks that separate likely score changes from normal test-set
-  wobble
-- dataset-wide warnings and opt-in conversion when a feature contains
-  numbers or dates stored as text
-- guarded per-group slice metrics
-- downloadable data-health reports and inferred dataset contracts
-- reference-versus-new CSV contract and drift checks
-
-Uploads are limited to 200 MB, 500,000 rows, and 250 columns so the local
-Streamlit session remains responsive.
-
-## Test
-
-```bash
-python -m pytest
+```text
+Data_Doctor/
+├── app.py                            # Streamlit entry point
+├── runtime.txt                       # Cloud environment Python specification (3.12)
+├── requirements.txt                  # Dependency version ranges
+├── data/
+│   ├── Original/                     # Immutable source datasets (Telco, Adult)
+│   ├── Messy/                        # Generated messy demo CSVs & issue manifest
+│   └── build_messy_datasets.py       # Deterministic demo generator
+├── data_doctor/
+│   ├── contracts.py                  # Inferred dataset contracts & PSI drift monitoring
+│   ├── detectors.py                  # 7 deterministic tabular issue detectors
+│   ├── treatments.py                 # Atomic, reproducible cleaning actions
+│   ├── report.py                     # Suggestion templates & between-run explanations
+│   └── ai_understanding/             # Decoupled Gemini semantic understanding layer
+│       ├── ai_client.py              # Gemini client with MockAIClient fallback
+│       ├── dataset_analyzer.py       # Domain purpose & dataset-level interpretation
+│       ├── column_analyzer.py        # Column-level semantic classification
+│       ├── response_schema.py        # Pydantic v2 structured schemas
+│       └── cache_manager.py          # Response caching to prevent duplicate API calls
+├── notebooks/
+│   ├── model_training.py             # Reusable, leakage-safe Logistic Regression pipeline
+│   └── prototype.py                  # CLI demo runner for detectors
+├── streamlit_ui/                     # Modular Streamlit frontend
+│   ├── dashboard.py                  # Page layout & orchestration
+│   ├── data_sources.py               # File uploader & demo dataset loaders
+│   ├── state.py                      # Session state, undo/redo stack
+│   ├── actions.py                    # UI action options & inputs
+│   ├── styles.py                     # Page theme and visual styling
+│   ├── visualizations/               # Altair histograms, bars, & outlier bins
+│   └── components/                   # Cards, modals, grids, & control panels
+└── tests/                            # pytest suite
 ```
 
+---
+
+## 📄 License
+
+This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.

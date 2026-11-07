@@ -10,7 +10,7 @@ import streamlit as st
 from data_doctor.detectors import Finding, diagnose
 from data_doctor.treatments import apply_action
 
-MAX_UNDO_STEPS = 20
+MAX_UNDO_STEPS = 8
 
 
 @st.cache_data(show_spinner=False)
@@ -46,6 +46,14 @@ def _reset_analysis_state() -> None:
     st.session_state.feature_drop_selection = []
     st.session_state.undo_stack = []
     st.session_state.redo_stack = []
+    st.session_state.column_page = 1
+    st.session_state.expanded_column = None
+    st.session_state.ai_understanding_result = None
+    st.session_state.ai_context_fingerprint = None
+    st.session_state.ai_is_stale = False
+    st.session_state.ai_user_description = ""
+    st.session_state.ai_excluded_columns = []
+    st.session_state.ai_consent = False
 
 
 def refresh_findings() -> list[Finding]:
@@ -72,6 +80,8 @@ def _restore_snapshot(snapshot: dict[str, Any]) -> None:
     st.session_state.findings = None
     st.session_state.latest_training_result = None
     st.session_state.feature_drop_selection = []
+    if st.session_state.get("ai_understanding_result") is not None:
+        st.session_state.ai_is_stale = True
 
 
 def push_undo() -> None:
@@ -138,4 +148,6 @@ def apply_working_action(
     if action != "keep_with_warning":
         st.session_state.findings = None
         st.session_state.latest_training_result = None
+        if st.session_state.get("ai_understanding_result") is not None:
+            st.session_state.ai_is_stale = True
     st.session_state.feature_drop_selection = []
