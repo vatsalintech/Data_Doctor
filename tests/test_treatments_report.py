@@ -415,3 +415,131 @@ def test_assess_feature_target_relationship_predictive_and_marginal():
     assert marginal_res["status"] == "Low / Marginal"
     assert "Marginal" in marginal_res["is_necessary"]
 
+
+def _missing_found(df: pd.DataFrame, target: str, column: str) -> bool:
+    findings = diagnose(df, target)
+    return any(
+        finding.found
+        and finding.issue_type == "missing_values"
+        and finding.scope == column
+        for finding in findings
+    )
+
+
+def test_mode_fill_clears_blank_and_question_mark_cells():
+    sex = (["M"] * 12) + (["F"] * 4) + ["?", " ", None, "  ?"]
+    df = pd.DataFrame(
+        {"Sex": sex, "label": ["yes", "no"] * 10}
+    )
+    assert _missing_found(df, "label", "Sex")
+
+    updated, log = apply_action(df, "label", "impute_mode", column="Sex")
+
+    assert log["details"]["fill_value"] == "M"
+    assert set(updated["Sex"]) == {"M", "F"}
+    assert not _missing_found(updated, "label", "Sex")
+
+
+def test_question_mark_is_not_chosen_as_the_mode():
+    df = pd.DataFrame(
+        {
+            "Sex": ["?"] * 12 + ["F"] * 4 + ["M"] * 2 + [None] * 2,
+            "label": ["yes", "no"] * 10,
+        }
+    )
+    updated, log = apply_action(df, "label", "impute_mode", column="Sex")
+
+    assert log["details"]["fill_value"] == "F"
+    assert "?" not in set(updated["Sex"].astype(str))
+    assert not _missing_found(updated, "label", "Sex")
+
+
+def test_drop_rows_missing_removes_blank_and_question_mark_rows():
+    df = pd.DataFrame(
+        {
+            "Sex": ["M", "?", " ", None, "F"] + ["M"] * 15,
+            "label": ["yes", "no"] * 10,
+        }
+    )
+    updated, _ = apply_action(
+        df, "label", "drop_rows_missing", column="Sex"
+    )
+
+    assert updated["Sex"].tolist() == ["M", "F"] + ["M"] * 15
+    assert not _missing_found(updated, "label", "Sex")
+
+
+def test_constant_fill_replaces_question_marks():
+    df = pd.DataFrame(
+        {
+            "Sex": ["M", "?", " ", None, "F"] + ["M"] * 15,
+            "label": ["yes", "no"] * 10,
+        }
+    )
+    updated, log = apply_action(
+        df, "label", "fill_constant", column="Sex", value="F"
+    )
+
+    assert log["details"]["fill_value"] == "F"
+    assert updated["Sex"].tolist().count("F") == 4
+    assert not _missing_found(updated, "label", "Sex")
+
+
+def test_split_replay_treats_question_marks_as_missing():
+    x_train = pd.DataFrame(
+        {"Sex": ["M", "M", "F", "?", None, " "]}
+    )
+    x_test = pd.DataFrame({"Sex": ["?", "F", None]})
+    y_train = pd.Series(["yes", "no", "yes", "no", "yes", "no"])
+    y_test = pd.Series(["yes", "no", "yes"])
+    actions = [{"action": "impute_mode", "column": "Sex"}]
+
+    filled_train, filled_test, filled_y_train, filled_y_test = (
+        apply_actions_to_split(
+            x_train, x_test, y_train, y_test, "label", actions
+        )
+    )
+
+    assert filled_train["Sex"].tolist() == ["M", "M", "F", "M", "M", "M"]
+    assert filled_test["Sex"].tolist() == ["M", "F", "M"]
+    assert filled_y_train.tolist() == y_train.tolist()
+    assert filled_y_test.tolist() == y_test.tolist()
+
+    dropped_train, kept_test, dropped_y_train, kept_y_test = (
+        apply_actions_to_split(
+            x_train,
+            x_test,
+            y_train,
+            y_test,
+            "label",
+            [{"action": "drop_rows_missing", "column": "Sex"}],
+        )
+    )
+    assert dropped_train["Sex"].tolist() == ["M", "M", "F"]
+    assert dropped_y_train.tolist() == ["yes", "no", "yes"]
+    assert kept_test["Sex"].tolist() == x_test["Sex"].tolist()
+    assert kept_y_test.tolist() == y_test.tolist()
+
+
+def test_drop_rows_missing_on_target_removes_training_question_marks():
+    x_train = pd.DataFrame({"feature": [1, 2, 3, 4]})
+    x_test = pd.DataFrame({"feature": [5, 6]})
+    y_train = pd.Series(["yes", "?", " ", "no"])
+    y_test = pd.Series(["?", "no"])
+
+    kept_train, kept_test, kept_y_train, kept_y_test = (
+        apply_actions_to_split(
+            x_train,
+            x_test,
+            y_train,
+            y_test,
+            "label",
+            [{"action": "drop_rows_missing", "column": "label"}],
+        )
+    )
+
+    assert kept_train["feature"].tolist() == [1, 4]
+    assert kept_y_train.tolist() == ["yes", "no"]
+    assert kept_test["feature"].tolist() == [5, 6]
+    assert kept_y_test.tolist() == ["?", "no"]
+

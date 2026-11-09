@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from data_doctor.detectors import Finding
+from data_doctor.detectors import Finding, normalize_missing_tokens
 from streamlit_ui.components.column_actions import render_column_actions
 from streamlit_ui.components.column_charts import (
     render_column_distribution_chart,
@@ -122,9 +122,10 @@ def _render_column_information(
         '<div class="dd-section-label">Information</div>',
         unsafe_allow_html=True,
     )
+    observed = normalize_missing_tokens(series)
     info = [
-        f"Missing: {series.isna().sum():,} ({series.isna().mean():.1%})",
-        f"Unique: {series.nunique(dropna=True):,}",
+        f"Missing: {observed.isna().sum():,} ({observed.isna().mean():.1%})",
+        f"Unique: {observed.nunique(dropna=True):,}",
     ]
     if is_identifier:
         info.append(
@@ -166,7 +167,11 @@ def _render_column_problems(issues: list[Finding]) -> None:
 
     items_html = []
     for finding in issues:
-        title = finding.issue_type.replace('_', ' ').title()
+        title = (
+            "Needs manual review"
+            if finding.issue_type == "manual_review"
+            else finding.issue_type.replace("_", " ").title()
+        )
         reason = finding.reason
         items_html.append(
             f'<div style="margin-bottom:0.3rem;">'

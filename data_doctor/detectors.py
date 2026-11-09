@@ -19,17 +19,56 @@ SUSPICIOUS_PREDICTION_MIN_GROUP_SIZE = 5
 SUSPICIOUS_PREDICTION_MAX_UNIQUE_RATE = 0.50
 MOSTLY_MISSING_THRESHOLD = 0.80
 STORED_TEXT_MIN_VALUES = 3
-MISSING_LABEL_TOKENS = {
+# Closed list of spellings that mean "no value" across real CSV exports.
+# This is not a guess about category names such as female/f/0.
+TEXT_MISSING_TOKENS = {
     "",
     "?",
+    "??",
     "???",
-    "-1",
+    "*",
+    "-",
+    "--",
+    ".",
     "na",
     "n/a",
+    "n.a",
+    "n.a.",
+    "na.",
+    "#n/a",
+    "#na",
+    "#n/a n/a",
+    "<na>",
     "none",
     "null",
+    "nil",
+    "nan",
+    "nat",
     "unknown",
+    "missing",
+    "not available",
+    "not applicable",
+    "unavailable",
+    "unspecified",
+    "not known",
+    "not specified",
+    "#value!",
+    "#div/0!",
+    "#ref!",
+    "#name?",
+    "#null!",
+    "#num!",
 }
+# Extreme sentinels that are almost never real measurements. -1 and 999 are
+# left in place and reported, because they can be legitimate values.
+NUMERIC_SENTINEL_VALUES = (-99, -999, -9999)
+PLACEHOLDER_REVIEW_VALUES = (-1, 999, 9999)
+MOSTLY_NUMERIC_THRESHOLD = 0.80
+PLACEHOLDER_MAX_SHARE = 0.05
+TARGET_LABEL_REVIEW_MIN = 10
+FEATURE_STRAY_UNIQUE_MIN = 15
+FEATURE_STRAY_RARE_MIN = 5
+MISSING_LABEL_TOKENS = TEXT_MISSING_TOKENS
 
 
 @dataclass(frozen=True)
@@ -46,17 +85,70 @@ class Finding:
         return asdict(self)
 
 
+def _is_text_like(series: pd.Series) -> bool:
+    return bool(
+        pd.api.types.is_object_dtype(series.dtype)
+        or pd.api.types.is_string_dtype(series.dtype)
+        or isinstance(series.dtype, pd.CategoricalDtype)
+    )
+
+
+def _text_key(series: pd.Series) -> pd.Series:
+    return series.astype("string").str.strip().str.lower()
+
+
+def missing_token_mask(series: pd.Series) -> pd.Series:
+    """True where a cell is empty or uses a known stand-in for missing."""
+    if pd.api.types.is_bool_dtype(series.dtype):
+        return series.isna()
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return series.isna() | series.isin(NUMERIC_SENTINEL_VALUES)
+    if not _is_text_like(series):
+        return series.isna()
+
+    key = _text_key(series)
+    text_missing = key.isin(TEXT_MISSING_TOKENS)
+    parsed = pd.to_numeric(key, errors="coerce")
+    candidate = series.notna() & ~text_missing
+    mostly_numeric = False
+    if int(candidate.sum()) >= 3:
+        mostly_numeric = bool(
+            parsed.loc[candidate].notna().mean() >= MOSTLY_NUMERIC_THRESHOLD
+        )
+    sentinel = (
+        parsed.isin(NUMERIC_SENTINEL_VALUES)
+        if mostly_numeric
+        else False
+    )
+    return series.isna() | text_missing | sentinel
+
+
+def normalize_missing_tokens(series: pd.Series) -> pd.Series:
+    """Return a copy where known missing stand-ins are real missing values.
+
+    Diagnosis, the missing count on a card, and fill or drop actions all
+    use this rule. Otherwise a card can say the missing count is zero while
+    the problem list still sees `?`, `unknown`, or `-999`.
+    """
+    if isinstance(series.dtype, pd.CategoricalDtype):
+        series = series.astype("object")
+    mask = missing_token_mask(series)
+    if not bool(mask.any()):
+        return series
+    return series.mask(mask, pd.NA)
+
+
 def prepare_data(df: pd.DataFrame) -> pd.DataFrame:
-    """Return a copy where blank strings and '?' count as missing."""
+    """Return a copy where known missing stand-ins count as missing."""
     prepared = df.copy()
     text_columns = prepared.select_dtypes(
-        include=["object", "string"]
+        include=["object", "string", "category"]
     ).columns
     for column in text_columns:
-        stripped = prepared[column].astype("string").str.strip()
-        prepared[column] = prepared[column].mask(
-            stripped.isin({"", "?"}), pd.NA
-        )
+        prepared[column] = normalize_missing_tokens(prepared[column])
+    numeric_columns = prepared.select_dtypes(include="number").columns
+    for column in numeric_columns:
+        prepared[column] = normalize_missing_tokens(prepared[column])
     return prepared
 
 
@@ -383,7 +475,9 @@ def suspicious_label_findings(
 ) -> list[Finding]:
     values = df[target]
     normalized = values.astype("string").str.strip().str.lower()
-    weird_mask = normalized.isin(MISSING_LABEL_TOKENS) | values.isna()
+    # Nulls are already reported as missing values. Weird labels are only
+    # non-empty stand-ins that normalization did not convert.
+    weird_mask = normalized.isin(MISSING_LABEL_TOKENS) & values.notna()
     weird_count = int(weird_mask.sum())
 
     shares = values.value_counts(normalize=True, dropna=True)
@@ -536,6 +630,217 @@ def leakage_findings(df: pd.DataFrame, target: str) -> list[Finding]:
     return findings
 
 
+def _variant_groups(values: pd.Series) -> list[list[str]]:
+    """Labels that match after trimming and ignoring letter case."""
+    text = values.astype("string")
+    folded = text.str.strip().str.lower()
+    groups: list[list[str]] = []
+    for _, subset in text.groupby(folded, sort=False):
+        forms = list(dict.fromkeys(str(item) for item in subset.tolist()))
+        if len(forms) > 1:
+            groups.append(forms[:4])
+    return groups
+
+
+def _placeholder_counts(values: pd.Series) -> list[str]:
+    parsed = pd.to_numeric(
+        values.astype("string").str.strip(), errors="coerce"
+    )
+    descriptions: list[str] = []
+    row_count = max(len(values), 1)
+    for token in PLACEHOLDER_REVIEW_VALUES:
+        count = int((parsed == token).sum())
+        if count == 0 or count / row_count >= PLACEHOLDER_MAX_SHARE:
+            continue
+        if token < 0:
+            other_negatives = int(((parsed < 0) & (parsed != token)).sum())
+            if other_negatives:
+                continue
+        descriptions.append(f"{token:g} ({count})")
+    return descriptions
+
+
+def _mostly_numeric_text(values: pd.Series) -> bool:
+    if len(values) < 3:
+        return False
+    parsed = pd.to_numeric(
+        values.astype("string").str.strip(), errors="coerce"
+    )
+    return bool(parsed.notna().mean() >= MOSTLY_NUMERIC_THRESHOLD)
+
+
+def label_review_findings(
+    df: pd.DataFrame, target: str
+) -> list[Finding]:
+    """Flag label mess that must be reviewed, without rewriting it.
+
+    Case, spaces, and alternate spellings are not merged. A wrong merge
+    changes what the column means.
+    """
+    findings: list[Finding] = []
+    text_columns = df.select_dtypes(
+        include=["object", "string", "category"]
+    ).columns
+    for column in text_columns:
+        series = df[column]
+        if is_likely_id(series):
+            continue
+        values = series.dropna()
+        if values.empty:
+            continue
+        reasons: list[str] = []
+        numeric_text = _mostly_numeric_text(values)
+        if numeric_text:
+            placeholders = _placeholder_counts(values)
+            if placeholders:
+                reasons.append(
+                    "Possible placeholder numbers were left as real "
+                    "measurements: "
+                    + ", ".join(placeholders)
+                    + "."
+                )
+            parsed = pd.to_numeric(
+                values.astype("string").str.strip(), errors="coerce"
+            )
+            unparsed = values.astype("string").str.strip()[parsed.isna()]
+            if len(unparsed):
+                examples = list(
+                    dict.fromkeys(str(item) for item in unparsed.tolist())
+                )[:4]
+                label_count = int(unparsed.nunique())
+                noun = "label" if label_count == 1 else "labels"
+                reasons.append(
+                    f"{label_count} {noun} could not be read as numbers ("
+                    + ", ".join(examples)
+                    + ")."
+                )
+        else:
+            groups = _variant_groups(values)
+            if groups:
+                shown = [", ".join(group) for group in groups[:3]]
+                extra = len(groups) - len(shown)
+                detail = "; ".join(shown)
+                if extra > 0:
+                    detail = f"{detail}; and {extra} more group(s)"
+                reasons.append(
+                    "Some labels differ only by letter case or spaces "
+                    f"({detail})."
+                )
+            visible = values.astype("string").str.strip()
+            folded = visible.str.lower()
+            label_count = int(visible.nunique())
+            rare_labels = int(
+                (
+                    folded.value_counts(normalize=True) < RARE_CLASS_THRESHOLD
+                ).sum()
+            )
+            if (
+                column == target
+                and label_count >= TARGET_LABEL_REVIEW_MIN
+            ):
+                reasons.append(
+                    f"The target has {label_count} distinct labels. "
+                    "Some of them may be the same class written in "
+                    "different ways."
+                )
+            elif (
+                column != target
+                and label_count >= FEATURE_STRAY_UNIQUE_MIN
+                and rare_labels >= FEATURE_STRAY_RARE_MIN
+            ):
+                reasons.append(
+                    f"This column has {label_count} distinct labels, "
+                    f"and {rare_labels} of them are uncommon."
+                )
+        if not reasons:
+            continue
+        severity = "low"
+        if column == target:
+            severity = "high"
+        elif numeric_text:
+            severity = "medium"
+        findings.append(
+            Finding(
+                issue_type="manual_review",
+                scope=column,
+                severity=severity,
+                found=True,
+                evidence={
+                    "labels": int(
+                        values.astype("string").str.strip().str.lower().nunique()
+                    )
+                },
+                suggested_action=None,
+                reason=(
+                    " ".join(reasons)
+                    + " Data Doctor will not guess a replacement or merge "
+                    "these values. Review them and fix the file yourself."
+                ),
+            )
+        )
+
+    spaced_names = [
+        str(column)
+        for column in df.columns
+        if str(column) != str(column).strip() or str(column).strip() == ""
+    ]
+    if spaced_names:
+        shown_names = ", ".join(repr(name) for name in spaced_names[:6])
+        findings.append(
+            Finding(
+                issue_type="manual_review",
+                scope="dataset",
+                severity="low",
+                found=True,
+                evidence={"columns": shown_names},
+                suggested_action=None,
+                reason=(
+                    "These column names are blank or have extra spaces: "
+                    f"{shown_names}. Rename them in the file. Data Doctor "
+                    "will not rename columns."
+                ),
+            )
+        )
+
+    numeric_columns = df.select_dtypes(include="number").columns
+    for column in numeric_columns:
+        if column == target:
+            continue
+        values = df[column].dropna()
+        if values.empty:
+            continue
+        descriptions: list[str] = []
+        row_count = max(len(values), 1)
+        for token in PLACEHOLDER_REVIEW_VALUES:
+            count = int((values == token).sum())
+            if count == 0 or count / row_count >= PLACEHOLDER_MAX_SHARE:
+                continue
+            if token < 0 and int(((values < 0) & (values != token)).sum()):
+                continue
+            descriptions.append(f"{token:g} ({count})")
+        if not descriptions:
+            continue
+        findings.append(
+            Finding(
+                issue_type="manual_review",
+                scope=column,
+                severity="medium",
+                found=True,
+                evidence={"placeholders": ", ".join(descriptions)},
+                suggested_action=None,
+                reason=(
+                    "Possible placeholder numbers were left as real "
+                    "measurements: "
+                    + ", ".join(descriptions)
+                    + ". Data Doctor will not treat them as missing, "
+                    "because they can be legitimate values. Review them "
+                    "yourself."
+                ),
+            )
+        )
+    return findings
+
+
 def diagnose(df: pd.DataFrame, target: str) -> list[Finding]:
     prepared = prepare_data(df)
     errors = validate_classification_table(prepared, target)
@@ -549,6 +854,7 @@ def diagnose(df: pd.DataFrame, target: str) -> list[Finding]:
         *outlier_findings(prepared, target),
         *suspicious_label_findings(prepared, target),
         *leakage_findings(prepared, target),
+        *label_review_findings(prepared, target),
     ]
 
 

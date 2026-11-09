@@ -46,6 +46,8 @@ def _render_dataset_issue_card(
         title = finding.issue_type.replace("_", " ").title()
         if finding.issue_type == "stored_as_text":
             title = f"Stored as text: {finding.scope}"
+        elif finding.issue_type == "manual_review":
+            title = "Needs manual review"
         st.markdown(
             f'<div class="dd-issue-title">{title}</div>',
             unsafe_allow_html=True,

@@ -6,7 +6,7 @@ from typing import Any
 
 import pandas as pd
 
-from data_doctor.detectors import Finding, MISSING_LABEL_TOKENS
+from data_doctor.detectors import Finding, missing_token_mask
 
 
 def action_options(
@@ -107,10 +107,7 @@ def action_options(
                 "drop_weird_label_rows",
                 target,
             )
-            normalized = df[target].astype("string").str.strip().str.lower()
-            recodable = (
-                normalized.isin(MISSING_LABEL_TOKENS) & df[target].notna()
-            )
+            recodable = missing_token_mask(df[target]) & df[target].notna()
             if recodable.any():
                 add("Recode a target label", "recode_label", target)
 
@@ -130,8 +127,7 @@ def action_options(
 
 
 def missing_like_label_values(series: pd.Series) -> list[Any]:
-    normalized = series.astype("string").str.strip().str.lower()
-    mask = normalized.isin(MISSING_LABEL_TOKENS) & series.notna()
+    mask = missing_token_mask(series) & series.notna()
     return series.loc[mask].drop_duplicates().tolist()
 
 

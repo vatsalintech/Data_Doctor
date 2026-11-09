@@ -7,7 +7,7 @@ from typing import Any
 import pandas as pd
 import streamlit as st
 
-from data_doctor.detectors import Finding
+from data_doctor.detectors import Finding, normalize_missing_tokens
 from streamlit_ui.components.ai_understanding import render_column_ai_understanding
 from streamlit_ui.components.column_actions import render_column_actions
 from streamlit_ui.components.column_charts import (
@@ -43,6 +43,35 @@ def render_action_feedback() -> None:
 # ─────────────────────────────────────────────────────────────────────────────
 # Priority-drop warning banner
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def render_manual_review_alert(findings: list[Finding]) -> None:
+    """Warn that some labels were left unchanged on purpose."""
+    reviews = [
+        finding
+        for finding in findings
+        if finding.found and finding.issue_type == "manual_review"
+    ]
+    if not reviews:
+        return
+    names = [
+        "column names"
+        if finding.scope == "dataset"
+        else str(finding.scope)
+        for finding in reviews
+    ]
+    shown = names[:12]
+    extra = len(names) - len(shown)
+    suffix = f", and {extra} more" if extra else ""
+    listed = ", ".join(f"**{name}**" for name in shown)
+    st.warning(
+        "Some values need a manual look. Data Doctor will not guess which "
+        "spellings or stray labels belong together, because merging the "
+        "wrong ones would change what the data means.\n\n"
+        f"Review these yourself: {listed}{suffix}.\n\n"
+        "Each flagged column says what to look at. Nothing is changed "
+        "until you edit the file or apply an action you choose."
+    )
 
 
 def render_priority_drop_warning(findings: list[Finding]) -> None:
@@ -356,9 +385,10 @@ def _render_column_information(
         '<div class="dd-section-label">Information</div>',
         unsafe_allow_html=True,
     )
+    observed = normalize_missing_tokens(series)
     info = [
-        f"Missing: {series.isna().sum():,} ({series.isna().mean():.1%})",
-        f"Unique: {series.nunique(dropna=True):,}",
+        f"Missing: {observed.isna().sum():,} ({observed.isna().mean():.1%})",
+        f"Unique: {observed.nunique(dropna=True):,}",
     ]
     if is_identifier:
         info.append(
@@ -381,6 +411,12 @@ def _render_column_information(
     )
 
 
+def _issue_title(finding: Finding) -> str:
+    if finding.issue_type == "manual_review":
+        return "Needs manual review"
+    return finding.issue_type.replace("_", " ").title()
+
+
 def _render_column_problems(issues: list[Finding]) -> None:
     st.markdown(
         '<div class="dd-section-label">Problems</div>',
@@ -400,7 +436,7 @@ def _render_column_problems(issues: list[Finding]) -> None:
 
     items_html = []
     for finding in issues:
-        title = finding.issue_type.replace('_', ' ').title()
+        title = _issue_title(finding)
         reason = finding.reason
         items_html.append(
             f'<div style="margin-bottom:0.3rem;">'

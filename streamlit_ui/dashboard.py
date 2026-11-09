@@ -9,6 +9,7 @@ from streamlit_ui.components.ai_understanding import (
     render_ai_understanding_section,
 )
 from streamlit_ui.components.columns import render_column_grid
+from streamlit_ui.components.columns import render_manual_review_alert
 from streamlit_ui.components.columns import render_priority_drop_warning
 from streamlit_ui.components.common import render_preview, render_vitals
 from streamlit_ui.components.controls import (
@@ -41,6 +42,16 @@ def main() -> None:
         reset_for_source(loaded_df, source_key, suggested_target)
 
     working = st.session_state.working_df
+    duplicate_names = working.columns[working.columns.duplicated()].unique()
+    if len(duplicate_names):
+        listed = ", ".join(str(name) for name in duplicate_names[:8])
+        st.error(
+            "This file has duplicate column names "
+            f"({listed}). Rename them so each name appears once, then "
+            "upload the file again. Data Doctor cannot tell those columns "
+            "apart, so it stops instead of cleaning the wrong one."
+        )
+        return
     prepared = prepare_data(working)
     blocked_targets = set(id_like_columns(prepared))
     target_options = [
@@ -78,6 +89,7 @@ def main() -> None:
         render_vitals(working)
         render_preview(working)
         render_ai_understanding_section(working, target=st.session_state.target)
+        render_manual_review_alert(findings)
         render_priority_drop_warning(findings)
         render_dataset_issues(findings, options)
 

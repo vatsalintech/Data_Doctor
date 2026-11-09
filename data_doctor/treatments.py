@@ -8,7 +8,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from data_doctor.detectors import MISSING_LABEL_TOKENS
+from data_doctor.detectors import missing_token_mask, normalize_missing_tokens
 
 ROW_ACTIONS = {
     "drop_exact_duplicates",
@@ -70,12 +70,12 @@ def coerce_constant(value: Any, series: pd.Series) -> Any:
 
 
 def _convert_stored_text(series: pd.Series, action: str) -> pd.Series:
-    normalized = series
+    normalized = normalize_missing_tokens(series)
     if pd.api.types.is_object_dtype(series) or pd.api.types.is_string_dtype(
         series
     ):
-        stripped = series.astype("string").str.strip()
-        normalized = stripped.mask(stripped.isin({"", "?"}), pd.NA)
+        stripped = normalized.astype("string").str.strip()
+        normalized = stripped.mask(stripped.str.len().fillna(0).eq(0), pd.NA)
     if action == "convert_to_number":
         converted = pd.to_numeric(normalized, errors="raise")
         finite_values = converted.dropna().to_numpy(dtype=float)
@@ -107,6 +107,23 @@ def _entry(
         "details": details or {},
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }
+
+
+def _learned_fill_value(
+    series: pd.Series, action: str
+) -> tuple[pd.Series, Any]:
+    """Normalize missing tokens, then learn the fill from the real values."""
+    normalized = normalize_missing_tokens(series)
+    if action == "impute_mean":
+        fill_value = normalized.mean()
+    elif action == "impute_median":
+        fill_value = normalized.median()
+    elif action == "impute_mode":
+        modes = normalized.mode(dropna=True)
+        fill_value = modes.iloc[0] if not modes.empty else pd.NA
+    else:
+        raise ValueError(f"Unsupported fill action: {action}")
+    return normalized, fill_value
 
 
 def _outlier_bounds(series: pd.Series) -> tuple[float, float]:
@@ -155,6 +172,7 @@ def apply_action(
     elif action == "drop_rows_missing":
         if column is None:
             raise ValueError("A column is required.")
+        result[column] = normalize_missing_tokens(result[column])
         result = result.dropna(subset=[column]).reset_index(drop=True)
     elif action == "drop_column":
         if column is None:
@@ -165,25 +183,20 @@ def apply_action(
     elif action in {"impute_mean", "impute_median", "impute_mode"}:
         if column is None:
             raise ValueError("A column is required.")
-        if action == "impute_mean":
-            fill_value = result[column].mean()
-        elif action == "impute_median":
-            fill_value = result[column].median()
-        else:
-            modes = result[column].mode(dropna=True)
-            if modes.empty:
-                raise ValueError("The column has no value to use as mode.")
-            fill_value = modes.iloc[0]
+        normalized, fill_value = _learned_fill_value(result[column], action)
+        if pd.isna(fill_value):
+            raise ValueError("The column has no value to use as a fill.")
         details["fill_value"] = _python_scalar(fill_value)
-        result[column] = result[column].fillna(fill_value)
+        result[column] = normalized.fillna(fill_value)
     elif action == "fill_constant":
         if column is None:
             raise ValueError("A column is required.")
         if value is None:
             raise ValueError("A constant value is required.")
-        typed_value = coerce_constant(value, result[column])
+        normalized = normalize_missing_tokens(result[column])
+        typed_value = coerce_constant(value, normalized)
         details["fill_value"] = _python_scalar(typed_value)
-        result[column] = result[column].fillna(typed_value)
+        result[column] = normalized.fillna(typed_value)
     elif action in TYPE_ACTIONS:
         if column is None:
             raise ValueError("A column is required.")
@@ -228,13 +241,7 @@ def apply_action(
             ~result[column].isin(rare_values), "Other"
         )
     elif action == "drop_weird_label_rows":
-        normalized = (
-            result[target].astype("string").str.strip().str.lower()
-        )
-        mask = (
-            normalized.isin(MISSING_LABEL_TOKENS)
-            | result[target].isna()
-        )
+        mask = missing_token_mask(result[target])
         details["removed_rows"] = int(mask.sum())
         result = result.loc[~mask].reset_index(drop=True)
     elif action == "recode_label":
@@ -297,33 +304,36 @@ def apply_actions_to_split(
             )[target].transform("nunique")
             keep = counts <= 1
             x_train, y_train = x_train.loc[keep], y_train.loc[keep]
+        elif action == "drop_rows_missing" and column == target:
+            keep = normalize_missing_tokens(y_train).notna()
+            x_train, y_train = x_train.loc[keep], y_train.loc[keep]
         elif action == "drop_rows_missing" and column in x_train.columns:
-            keep = x_train[column].notna()
+            keep = normalize_missing_tokens(x_train[column]).notna()
             x_train, y_train = x_train.loc[keep], y_train.loc[keep]
         elif action in {
             "impute_mean",
             "impute_median",
             "impute_mode",
         } and column in x_train.columns:
-            if action == "impute_mean":
-                fill_value = x_train[column].mean()
-            elif action == "impute_median":
-                fill_value = x_train[column].median()
-            else:
-                modes = x_train[column].mode(dropna=True)
-                if modes.empty:
-                    continue
-                fill_value = modes.iloc[0]
+            normalized, fill_value = _learned_fill_value(
+                x_train[column], action
+            )
             if pd.isna(fill_value):
                 continue
-            x_train[column] = x_train[column].fillna(fill_value)
-            x_test[column] = x_test[column].fillna(fill_value)
+            x_train[column] = normalized.fillna(fill_value)
+            x_test[column] = normalize_missing_tokens(
+                x_test[column]
+            ).fillna(fill_value)
         elif action == "fill_constant" and column in x_train.columns:
             fill_value = coerce_constant(
                 details.get("fill_value"), x_train[column]
             )
-            x_train[column] = x_train[column].fillna(fill_value)
-            x_test[column] = x_test[column].fillna(fill_value)
+            x_train[column] = normalize_missing_tokens(
+                x_train[column]
+            ).fillna(fill_value)
+            x_test[column] = normalize_missing_tokens(
+                x_test[column]
+            ).fillna(fill_value)
         elif action in TYPE_ACTIONS and column in x_train.columns:
             x_train[column] = _convert_stored_text(
                 x_train[column], action
@@ -360,13 +370,7 @@ def apply_actions_to_split(
                 ~x_test[column].isin(rare_values), "Other"
             )
         elif action == "drop_weird_label_rows":
-            normalized = (
-                y_train.astype("string").str.strip().str.lower()
-            )
-            keep = (
-                ~normalized.isin(MISSING_LABEL_TOKENS)
-                & y_train.notna()
-            )
+            keep = ~missing_token_mask(y_train)
             x_train, y_train = x_train.loc[keep], y_train.loc[keep]
         elif action == "recode_label":
             y_train = y_train.replace(
