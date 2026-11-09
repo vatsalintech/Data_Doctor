@@ -39,6 +39,35 @@ def _prepare_table(df: pd.DataFrame) -> pd.DataFrame:
     return prepare_data(df)
 
 
+def _sklearn_features(frame: pd.DataFrame) -> pd.DataFrame:
+    """Turn pandas missing markers into np.nan for scikit-learn.
+
+    Text cleaning stores blanks as ``pd.NA``. SimpleImputer cannot test
+    that marker as a boolean, so training converts its own copies only.
+    """
+    converted = frame.copy()
+    for column in converted.columns:
+        series = converted[column]
+        if pd.api.types.is_datetime64_any_dtype(series):
+            continue
+        if (
+            pd.api.types.is_numeric_dtype(series)
+            and not pd.api.types.is_bool_dtype(series)
+        ):
+            if pd.api.types.is_extension_array_dtype(series.dtype):
+                converted[column] = series.astype("float64")
+            continue
+        if (
+            series.dtype == object
+            or pd.api.types.is_string_dtype(series)
+            or pd.api.types.is_bool_dtype(series)
+            or isinstance(series.dtype, pd.CategoricalDtype)
+        ):
+            values = series.astype(object)
+            converted[column] = values.where(values.notna(), np.nan)
+    return converted
+
+
 def _validate(df: pd.DataFrame, target: str) -> None:
     if target not in df.columns:
         raise ValueError(f"Target column {target!r} was not found.")
@@ -499,6 +528,8 @@ def train_model(
         x_train, y_train, sampling, seed
     )
     train_rows_after_sampling = len(x_train)
+    x_train = _sklearn_features(x_train)
+    x_test = _sklearn_features(x_test)
 
     pipeline = _build_pipeline(
         x_train, class_weight=class_weight, seed=seed

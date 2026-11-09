@@ -41,6 +41,17 @@ def test_training_is_generic_and_deterministic():
     assert len(first["bootstrap_metrics"]["accuracy"]) == 400
 
 
+def test_pandas_missing_text_can_train():
+    df = _demo_table()
+    df["category"] = df["category"].astype("string")
+    df.loc[0:4, "category"] = pd.NA
+    df["note"] = "ok"
+    df.loc[5:8, "note"] = "  ?"
+    result = train_model(df, "label")
+    assert result["metrics"]["accuracy"] >= 0
+    assert "note" in result["feature_relevance"]
+
+
 def test_imputer_is_fit_on_training_rows_only():
     df = _demo_table()
     df.loc[0:10, "numeric"] = None
