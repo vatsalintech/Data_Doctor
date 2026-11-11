@@ -50,16 +50,13 @@ def render_manual_review_alert(findings: list[Finding]) -> None:
     reviews = [
         finding
         for finding in findings
-        if finding.found and finding.issue_type == "manual_review"
+        if finding.found
+        and finding.issue_type == "manual_review"
+        and finding.scope != "dataset"  # dataset-scope reviews appear in dataset cards
     ]
     if not reviews:
         return
-    names = [
-        "column names"
-        if finding.scope == "dataset"
-        else str(finding.scope)
-        for finding in reviews
-    ]
+    names = [str(finding.scope) for finding in reviews]
     shown = names[:12]
     extra = len(names) - len(shown)
     suffix = f", and {extra} more" if extra else ""

@@ -18,7 +18,7 @@ from data_doctor.report import (
     build_run_record,
     health_report_json,
 )
-from notebooks.model_training import train_model
+from data_doctor.model_training import train_model
 from streamlit_ui.components.dialogs import (
     render_feature_relevance,
     render_training_results,
@@ -87,6 +87,26 @@ def _render_training_controls(
     is_binary = len(target_classes) == 2
     positive_class: str | None = None
 
+    model_choice = st.selectbox(
+        "Model",
+        [
+            "Logistic Regression",
+            "Hist Gradient Boosting",
+        ],
+        help=(
+            "**Logistic Regression** – fast linear model, good baseline. "
+            "Feature relevance uses normalised coefficient weights.\n\n"
+            "**Hist Gradient Boosting** – tree-based model that natively "
+            "handles missing values. Feature relevance uses mean absolute "
+            "gain (feature_importances_)."
+        ),
+    )
+    model_type = (
+        "hist_gradient_boosting"
+        if model_choice == "Hist Gradient Boosting"
+        else "logistic_regression"
+    )
+
     strategy = st.selectbox(
         "Class imbalance",
         [
@@ -123,8 +143,13 @@ def _render_training_controls(
         "Random undersample": "undersample",
     }.get(strategy)
 
+    button_label = (
+        "Train Hist Gradient Boosting"
+        if model_type == "hist_gradient_boosting"
+        else "Train Logistic Regression"
+    )
     if st.button(
-        "Train Logistic Regression",
+        button_label,
         type="primary",
         key="train_model_button",
         width="stretch",
@@ -135,6 +160,7 @@ def _render_training_controls(
             class_weight,
             sampling,
             positive_class=positive_class,
+            model_type=model_type,
         )
 
     result_available = st.session_state.latest_training_result is not None
@@ -168,6 +194,7 @@ def _train(
     class_weight: str | None,
     sampling: str | None,
     positive_class: str | None = None,
+    model_type: str = "logistic_regression",
 ) -> None:
     try:
         with st.spinner("Training…"):
@@ -178,6 +205,7 @@ def _train(
                 sampling=sampling,
                 actions=st.session_state.action_log,
                 positive_class=positive_class,
+                model_type=model_type,
             )
         record = build_run_record(
             result,

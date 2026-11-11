@@ -78,6 +78,7 @@ def build_run_record(
         "action_log_position": int(action_log_position),
         "class_weight": training_result["class_weight"],
         "sampling": training_result["sampling"],
+        "model_type": training_result.get("model_type", "logistic_regression"),
         "warnings": training_result.get("warnings", []),
         "slice_diagnostics": training_result.get(
             "slice_diagnostics", []
@@ -191,6 +192,10 @@ def compare_runs(
             "sampling": {
                 "before": previous.get("sampling"),
                 "after": current.get("sampling"),
+            },
+            "model_type": {
+                "before": previous.get("model_type", "logistic_regression"),
+                "after": current.get("model_type", "logistic_regression"),
             },
         },
         "accuracy": _metric_change(

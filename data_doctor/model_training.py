@@ -1,4 +1,4 @@
-"""Reusable Logistic Regression training for any classification table."""
+"""Leakage-safe model training pipeline (Logistic Regression and HistGradientBoostingClassifier)."""
 
 from __future__ import annotations
 
@@ -9,7 +9,9 @@ import numpy as np
 import pandas as pd
 from sklearn.exceptions import ConvergenceWarning
 from sklearn.compose import ColumnTransformer
+from sklearn.ensemble import HistGradientBoostingClassifier
 from sklearn.impute import SimpleImputer
+from sklearn.inspection import permutation_importance
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
@@ -24,6 +26,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
     FunctionTransformer,
+    OrdinalEncoder,
     OneHotEncoder,
     StandardScaler,
 )
@@ -32,6 +35,7 @@ from data_doctor.detectors import prepare_data
 from data_doctor.treatments import apply_actions_to_split
 
 Sampling = Literal["oversample", "undersample"] | None
+ModelType = Literal["logistic_regression", "hist_gradient_boosting"]
 BOOTSTRAP_REPETITIONS = 400
 
 
@@ -184,6 +188,11 @@ def _build_pipeline(
     numeric_columns = x_train.select_dtypes(
         include="number"
     ).columns.tolist()
+    usable_numeric = [
+        column
+        for column in numeric_columns
+        if not x_train[column].dropna().empty
+    ]
     datetime_columns = [
         column
         for column in x_train.columns
@@ -196,7 +205,7 @@ def _build_pipeline(
         and column not in datetime_columns
     ]
     transformers = []
-    if numeric_columns:
+    if usable_numeric:
         transformers.append(
             (
                 "numeric",
@@ -209,7 +218,7 @@ def _build_pipeline(
                         ("scaler", StandardScaler()),
                     ]
                 ),
-                numeric_columns,
+                usable_numeric,
             )
         )
     if datetime_columns:
@@ -276,13 +285,168 @@ def _build_pipeline(
     )
 
 
+def _build_hgb_pipeline(
+    x_train: pd.DataFrame,
+    *,
+    class_weight: str | None,
+    seed: int,
+) -> Pipeline:
+    """Build a HistGradientBoostingClassifier pipeline.
+
+    HGB natively handles missing values in numeric columns and accepts
+    categorical features directly via OrdinalEncoder with unknown handling.
+    Datetime columns are converted to numeric days first.
+    """
+    numeric_columns = x_train.select_dtypes(
+        include="number"
+    ).columns.tolist()
+    usable_numeric = [
+        column
+        for column in numeric_columns
+        if not x_train[column].dropna().empty
+    ]
+    datetime_columns = [
+        column
+        for column in x_train.columns
+        if pd.api.types.is_datetime64_any_dtype(x_train[column])
+    ]
+    categorical_columns = [
+        column
+        for column in x_train.columns
+        if column not in numeric_columns
+        and column not in datetime_columns
+    ]
+    transformers = []
+    if usable_numeric:
+        # HGB handles NaN natively — no imputation needed for numerics.
+        transformers.append(("numeric", "passthrough", usable_numeric))
+    if datetime_columns:
+        # Convert datetimes to numeric days; HGB will handle any remaining NaN.
+        transformers.append(
+            (
+                "datetime",
+                FunctionTransformer(_datetime_to_days, validate=False),
+                datetime_columns,
+            )
+        )
+    if categorical_columns:
+        # OrdinalEncoder is required; HGB reads integer codes directly.
+        transformers.append(
+            (
+                "categorical",
+                OrdinalEncoder(
+                    handle_unknown="use_encoded_value",
+                    unknown_value=np.nan,
+                    encoded_missing_value=np.nan,
+                    max_categories=50,
+                ),
+                categorical_columns,
+            )
+        )
+    if not transformers:
+        raise ValueError("No usable feature columns remain.")
+
+    # Build the list of categorical feature indices for HGB so it treats
+    # them as unordered categories rather than numeric magnitudes.
+    # The preprocessor outputs: numerics first, then datetimes, then categoricals.
+    n_numeric = len(usable_numeric)
+    n_datetime = len(datetime_columns)
+    n_categorical = len(categorical_columns)
+    categorical_features = list(
+        range(n_numeric + n_datetime, n_numeric + n_datetime + n_categorical)
+    )
+
+    preprocessor = ColumnTransformer(
+        transformers=transformers,
+        remainder="drop",
+    )
+    model = HistGradientBoostingClassifier(
+        max_iter=300,
+        class_weight=class_weight,
+        random_state=seed,
+        categorical_features=categorical_features if categorical_features else None,
+    )
+    return Pipeline(
+        steps=[("preprocessor", preprocessor), ("model", model)]
+    )
+
+
 def _feature_relevance(
     pipeline: Pipeline,
     source_columns: list[str],
+    *,
+    x_eval: pd.DataFrame | None = None,
+    y_eval: pd.Series | None = None,
+    seed: int = 42,
 ) -> dict[str, float]:
-    """Aggregate absolute encoded coefficients back to source columns."""
+    """Aggregate model importance scores back to source columns.
+
+    For Logistic Regression the absolute coefficient weights are used.
+    For HistGradientBoostingClassifier, permutation feature importance is
+    computed on held-out evaluation rows (measuring drop in prediction accuracy).
+    Both are normalised to sum to 1.0.
+    """
     preprocessor = pipeline.named_steps["preprocessor"]
     model = pipeline.named_steps["model"]
+
+    if not hasattr(model, "coef_"):
+        # Non-linear model (e.g. HistGradientBoostingClassifier):
+        # Compute permutation feature importance on evaluation rows.
+        if (
+            x_eval is not None
+            and y_eval is not None
+            and len(x_eval) > 0
+            and len(source_columns) > 0
+        ):
+            sample_size = min(len(x_eval), 400)
+            if len(x_eval) > sample_size:
+                eval_idx = np.random.default_rng(seed).choice(
+                    len(x_eval), size=sample_size, replace=False
+                )
+                x_sample = x_eval.iloc[eval_idx]
+                y_sample = y_eval.iloc[eval_idx]
+            else:
+                x_sample = x_eval
+                y_sample = y_eval
+
+            try:
+                perm_result = permutation_importance(
+                    pipeline,
+                    x_sample,
+                    y_sample,
+                    n_repeats=3,
+                    random_state=seed,
+                    scoring="accuracy",
+                    n_jobs=1,
+                )
+                mean_scores = np.maximum(0.0, perm_result.importances_mean)
+                total = float(mean_scores.sum())
+                if total > 0:
+                    relevance = {
+                        col: float(score / total)
+                        for col, score in zip(x_sample.columns, mean_scores)
+                    }
+                    # Ensure all source columns exist in relevance dict
+                    for col in source_columns:
+                        if col not in relevance:
+                            relevance[col] = 0.0
+                    return dict(
+                        sorted(
+                            relevance.items(),
+                            key=lambda item: item[1],
+                            reverse=True,
+                        )
+                    )
+            except Exception:
+                pass  # Fall back to equal weights if permutation fails
+
+        n = len(source_columns)
+        if n == 0:
+            return {}
+        equal = 1.0 / n
+        return {col: equal for col in source_columns}
+
+    # Logistic Regression: average absolute coefficients across classes
     coefficients = np.abs(model.coef_)
     encoded_relevance = (
         coefficients.mean(axis=0)
@@ -485,8 +649,13 @@ def train_model(
     sampling: Sampling = None,
     actions: list[dict[str, Any]] | None = None,
     positive_class: str | None = None,
+    model_type: ModelType = "logistic_regression",
 ) -> dict[str, Any]:
-    """Split, preprocess, train, and evaluate Logistic Regression.
+    """Split, preprocess, train, and evaluate a classification model.
+
+    Supported model_type values:
+    - ``"logistic_regression"``  – sklearn LogisticRegression (default)
+    - ``"hist_gradient_boosting"`` – sklearn HistGradientBoostingClassifier
 
     Learned preprocessing is fit on training rows only. The input DataFrame
     is never mutated.
@@ -531,9 +700,14 @@ def train_model(
     x_train = _sklearn_features(x_train)
     x_test = _sklearn_features(x_test)
 
-    pipeline = _build_pipeline(
-        x_train, class_weight=class_weight, seed=seed
-    )
+    if model_type == "hist_gradient_boosting":
+        pipeline = _build_hgb_pipeline(
+            x_train, class_weight=class_weight, seed=seed
+        )
+    else:
+        pipeline = _build_pipeline(
+            x_train, class_weight=class_weight, seed=seed
+        )
     training_warnings: list[str] = []
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always", ConvergenceWarning)
@@ -565,7 +739,11 @@ def train_model(
         )
     ).tolist()
     relevance = _feature_relevance(
-        pipeline, x_train.columns.tolist()
+        pipeline,
+        x_train.columns.tolist(),
+        x_eval=x_test,
+        y_eval=y_test,
+        seed=seed,
     )
 
     # Save probabilities for threshold-free metrics and UI threshold slider
@@ -667,6 +845,7 @@ def train_model(
         "class_weight": class_weight,
         "sampling": sampling,
         "positive_class": positive_class,
+        "model_type": model_type,
         "train_rows_before": int(train_rows_before),
         "train_rows_after": int(train_rows_after_sampling),
         "train_rows_after_cleaning": int(train_rows_after_cleaning),

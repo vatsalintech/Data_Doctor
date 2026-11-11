@@ -37,6 +37,13 @@ def render_training_results() -> None:
     is_binary = pos_class is not None
 
     st.subheader("Latest run results")
+    model_type = (result or {}).get("model_type", "logistic_regression")
+    model_label = (
+        "Hist Gradient Boosting"
+        if model_type == "hist_gradient_boosting"
+        else "Logistic Regression"
+    )
+    st.caption(f"Model: **{model_label}**")
 
     # ── Threshold control (binary only) ──────────────────────────────────────
     threshold = 0.5
@@ -214,6 +221,7 @@ def render_training_results() -> None:
     st.markdown("**Run history**")
     visible = [
         "run_number",
+        "model_type",
         "accuracy",
         "precision",
         "recall",
@@ -534,6 +542,7 @@ def render_feature_relevance() -> None:
         st.info("Train the model first.")
         return
     relevance = result["feature_relevance"]
+    model_type = result.get("model_type", "logistic_regression")
     relevance_table = pd.DataFrame(
         {
             "Column": list(relevance),
@@ -543,16 +552,25 @@ def render_feature_relevance() -> None:
     relevance_table["Influence %"] = (
         relevance_table["Model influence"] * 100
     ).round(2)
-    st.caption(
-        "Each percentage is that column's share of the model's absolute "
-        "Logistic Regression coefficient weight. Numeric and date columns "
-        "are scaled first, so a coefficient describes a one-standard-deviation "
-        "change. A categorical percentage adds up that column's encoded "
-        "categories, and a column with many categories can therefore look "
-        "larger. Correlated columns can split one pattern across several "
-        "percentages. This is model influence, not proof that a feature "
-        "causes the target."
-    )
+    if model_type == "hist_gradient_boosting":
+        st.caption(
+            "For Hist Gradient Boosting, each percentage represents that "
+            "column's share of permutation feature importance (mean decrease "
+            "in test accuracy when that feature's values are shuffled). "
+            "This measures non-linear predictive influence across trees. "
+            "This is model influence, not proof that a feature causes the target."
+        )
+    else:
+        st.caption(
+            "Each percentage is that column's share of the model's absolute "
+            "Logistic Regression coefficient weight. Numeric and date columns "
+            "are scaled first, so a coefficient describes a one-standard-deviation "
+            "change. A categorical percentage adds up that column's encoded "
+            "categories, and a column with many categories can therefore look "
+            "larger. Correlated columns can split one pattern across several "
+            "percentages. This is model influence, not proof that a feature "
+            "causes the target."
+        )
     chart_height = min(700, max(260, len(relevance_table) * 24))
     chart = (
         alt.Chart(relevance_table)

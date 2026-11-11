@@ -543,3 +543,41 @@ def test_drop_rows_missing_on_target_removes_training_question_marks():
     assert kept_test["feature"].tolist() == [5, 6]
     assert kept_y_test.tolist() == ["?", "no"]
 
+
+
+def test_manual_review_alert_ignores_dataset_scope():
+    """Dataset-level manual review findings must not trigger the column alert banner."""
+    from unittest.mock import patch
+    from data_doctor.detectors import Finding
+    from streamlit_ui.components.columns import render_manual_review_alert
+
+    # Finding with scope='dataset' (e.g. spaced column names)
+    dataset_finding = Finding(
+        issue_type="manual_review",
+        scope="dataset",
+        severity="low",
+        found=True,
+        evidence={"columns": "col"},
+        suggested_action=None,
+        reason="Dataset spaced column names",
+    )
+    with patch("streamlit.warning") as mock_warning:
+        render_manual_review_alert([dataset_finding])
+        mock_warning.assert_not_called()
+
+    # Finding with specific column scope
+    column_finding = Finding(
+        issue_type="manual_review",
+        scope="tenure",
+        severity="medium",
+        found=True,
+        evidence={"placeholders": "999 (5)"},
+        suggested_action=None,
+        reason="Placeholder values",
+    )
+    with patch("streamlit.warning") as mock_warning:
+        render_manual_review_alert([column_finding])
+        mock_warning.assert_called_once()
+        warning_msg = mock_warning.call_args[0][0]
+        assert "**tenure**" in warning_msg
+        assert "column names" not in warning_msg

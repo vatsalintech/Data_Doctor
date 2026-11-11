@@ -3,7 +3,7 @@ import pandas as pd
 import pytest
 
 from data_doctor.report import compare_runs
-from notebooks.model_training import _slice_diagnostics, train_model
+from data_doctor.model_training import _slice_diagnostics, train_model
 
 
 def _demo_table() -> pd.DataFrame:
@@ -372,3 +372,42 @@ def test_explicit_date_conversion_remains_trainable():
     assert "datetime" in preprocessor.named_transformers_
     assert "event_date" in result["feature_relevance"]
 
+
+
+def test_hist_gradient_boosting_produces_valid_metrics():
+    """HGB model_type returns the same metric keys as logistic regression."""
+    df = _demo_table()
+    result = train_model(df, "label", model_type="hist_gradient_boosting")
+    assert result["model_type"] == "hist_gradient_boosting"
+    metrics = result["metrics"]
+    for key in ("accuracy", "macro_f1", "confusion_matrix", "labels"):
+        assert key in metrics, f"Missing metric key: {key}"
+    assert 0.0 <= metrics["accuracy"] <= 1.0
+    assert result["feature_relevance"]
+    total = sum(result["feature_relevance"].values())
+    assert abs(total - 1.0) < 1e-6, f"feature_relevance sums to {total}, expected ~1.0"
+
+
+def test_hist_gradient_boosting_handles_missing_numerics():
+    """HGB trains without error when numeric features contain NaN."""
+    df = _demo_table()
+    df.loc[df.index[:5], "numeric"] = float("nan")
+    result = train_model(df, "label", model_type="hist_gradient_boosting")
+    assert result["metrics"]["accuracy"] > 0.0
+
+
+def test_logistic_regression_model_type_key_in_result():
+    """Default model_type key is 'logistic_regression'."""
+    df = _demo_table()
+    result = train_model(df, "label")
+    assert result["model_type"] == "logistic_regression"
+
+
+def test_training_handles_all_nan_numeric_column():
+    """Both LR and HGB pipelines safely handle completely missing numeric columns."""
+    df = _demo_table()
+    df["empty_numeric"] = float("nan")
+    lr_res = train_model(df, "label", model_type="logistic_regression")
+    assert lr_res["metrics"]["accuracy"] > 0.0
+    hgb_res = train_model(df, "label", model_type="hist_gradient_boosting")
+    assert hgb_res["metrics"]["accuracy"] > 0.0
