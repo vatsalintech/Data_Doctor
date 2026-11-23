@@ -411,3 +411,82 @@ def test_training_handles_all_nan_numeric_column():
     assert lr_res["metrics"]["accuracy"] > 0.0
     hgb_res = train_model(df, "label", model_type="hist_gradient_boosting")
     assert hgb_res["metrics"]["accuracy"] > 0.0
+
+
+def test_k_fold_cross_validation_logistic_regression():
+    """K-fold cross-validation computes per-fold metrics and a valid summary."""
+    df = _demo_table()
+    result = train_model(df, "label", cv_folds=5, seed=42)
+
+    assert result["cv_folds"] == 5
+    assert len(result["cv_fold_metrics"]) == 5
+
+    summary = result["cv_summary"]
+    assert "accuracy_mean" in summary
+    assert "accuracy_std" in summary
+    assert "macro_f1_mean" in summary
+    assert "macro_f1_std" in summary
+    assert 0.0 <= summary["accuracy_mean"] <= 1.0
+    assert summary["accuracy_std"] >= 0.0
+    assert 0.0 <= summary["macro_f1_mean"] <= 1.0
+
+    # Binary targets have ROC-AUC and PR-AUC in cv_summary
+    assert summary["roc_auc_mean"] is not None
+    assert 0.0 <= summary["roc_auc_mean"] <= 1.0
+    assert summary["average_precision_mean"] is not None
+
+    # Out-of-fold evaluation covers all rows
+    assert result["test_rows"] == len(df)
+    assert len(result["y_test"]) == len(df)
+    assert len(result["test_probabilities"]) == len(df)
+
+    # Final pipeline is fitted and exportable
+    assert result["pipeline"] is not None
+    assert result["feature_relevance"]
+    # Bootstrap wobble check belongs to the hold-out path only
+    assert result["bootstrap_metrics"] is None
+
+
+def test_k_fold_cross_validation_hist_gradient_boosting():
+    """K-fold cross validation works with HistGradientBoostingClassifier."""
+    df = _demo_table()
+    result = train_model(
+        df,
+        "label",
+        cv_folds=3,
+        model_type="hist_gradient_boosting",
+        seed=10,
+    )
+    assert result["cv_folds"] == 3
+    assert len(result["cv_fold_metrics"]) == 3
+    assert result["model_type"] == "hist_gradient_boosting"
+    assert result["cv_summary"]["accuracy_mean"] > 0.0
+
+
+def test_k_fold_cross_validation_deterministic():
+    """K-fold cross-validation produces identical results with the same seed."""
+    df = _demo_table()
+    run1 = train_model(df, "label", cv_folds=4, seed=99)
+    run2 = train_model(df, "label", cv_folds=4, seed=99)
+
+    assert run1["cv_summary"] == run2["cv_summary"]
+    assert run1["metrics"] == run2["metrics"]
+    assert run1["cv_fold_metrics"] == run2["cv_fold_metrics"]
+
+
+def test_k_fold_with_actions():
+    """K-fold cross-validation applies data cleaning actions per-fold safely."""
+    df = _demo_table()
+    df["extra_feature"] = 1.0
+    df.loc[0:5, "numeric"] = float("nan")
+
+    actions = [
+        {"action": "drop_column", "column": "extra_feature"},
+        {"action": "impute_median", "column": "numeric", "details": {"fill_value": 0.0}},
+    ]
+
+    result = train_model(df, "label", cv_folds=3, actions=actions, seed=42)
+    assert result["cv_folds"] == 3
+    assert "extra_feature" not in result["columns"]
+    assert result["cv_summary"]["accuracy_mean"] > 0.0
+

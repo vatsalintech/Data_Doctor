@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any, Literal
+from typing import Any, Literal, Optional
 
 import numpy as np
 import pandas as pd
@@ -22,7 +22,7 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import (
     FunctionTransformer,
@@ -34,7 +34,7 @@ from sklearn.preprocessing import (
 from data_doctor.detectors import prepare_data
 from data_doctor.treatments import apply_actions_to_split
 
-Sampling = Literal["oversample", "undersample"] | None
+Sampling = Optional[Literal["oversample", "undersample"]]
 ModelType = Literal["logistic_regression", "hist_gradient_boosting"]
 BOOTSTRAP_REPETITIONS = 400
 
@@ -125,6 +125,44 @@ def _group_aware_split(
         y.loc[train_mask].copy(),
         y.loc[test_mask].copy(),
     )
+
+
+def _group_aware_cv_splits(
+    x: pd.DataFrame,
+    y: pd.Series,
+    *,
+    n_splits: int,
+    seed: int,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Generate train/val positional index splits keeping identical feature rows together."""
+    groups = pd.util.hash_pandas_object(x, index=False)
+    group_table = pd.DataFrame({"group": groups, "target": y})
+    group_targets = (
+        group_table.drop_duplicates("group", keep="first")
+        .set_index("group")["target"]
+    )
+    group_counts = group_targets.value_counts()
+    min_count = int(group_counts.min()) if not group_counts.empty else 0
+    actual_splits = min(n_splits, min_count)
+    if actual_splits < 2:
+        raise ValueError(
+            f"Cannot perform {n_splits}-fold cross-validation: the smallest target class "
+            f"has only {min_count} independent group(s). At least 2 groups are required."
+        )
+
+    skf = StratifiedKFold(n_splits=actual_splits, shuffle=True, random_state=seed)
+    unique_groups = group_targets.index.to_numpy()
+    group_labels = group_targets.to_numpy()
+
+    splits: list[tuple[np.ndarray, np.ndarray]] = []
+    groups_array = groups.to_numpy()
+    for train_grp_idx, val_grp_idx in skf.split(unique_groups, group_labels):
+        train_groups_set = set(unique_groups[train_grp_idx])
+        val_groups_set = set(unique_groups[val_grp_idx])
+        train_indices = np.where(np.isin(groups_array, list(train_groups_set)))[0]
+        val_indices = np.where(np.isin(groups_array, list(val_groups_set)))[0]
+        splits.append((train_indices, val_indices))
+    return splits
 
 
 def _resample_training_rows(
@@ -639,6 +677,260 @@ def _bootstrap_metric_samples(
     }
 
 
+def _train_model_cv(
+    prepared: pd.DataFrame,
+    target: str,
+    *,
+    cv_folds: int = 5,
+    seed: int = 42,
+    class_weight: str | None = None,
+    sampling: Sampling = None,
+    actions: list[dict[str, Any]] | None = None,
+    positive_class: str | None = None,
+    model_type: ModelType = "logistic_regression",
+) -> dict[str, Any]:
+    """Train and evaluate with group-aware stratified K-Fold cross-validation."""
+    actions = actions or []
+    missing_target_rows = int(prepared[target].isna().sum())
+    usable = prepared.dropna(subset=[target]).copy()
+    x = usable.drop(columns=[target])
+    y = usable[target]
+
+    splits = _group_aware_cv_splits(x, y, n_splits=cv_folds, seed=seed)
+    actual_folds = len(splits)
+
+    unique_classes = sorted(list(pd.unique(y)))
+    is_binary = len(unique_classes) == 2
+    pos_class: str | None = None
+    if is_binary:
+        sorted_labels = [str(c) for c in unique_classes]
+        if positive_class and str(positive_class) in sorted_labels:
+            pos_class = str(positive_class)
+        else:
+            pos_class = sorted_labels[1]
+
+    oof_preds = np.empty(len(usable), dtype=object)
+    oof_probs = np.zeros((len(usable), len(unique_classes)), dtype=float)
+    fold_metrics: list[dict[str, Any]] = []
+    training_warnings: list[str] = []
+
+    for fold_num, (tr_idx, val_idx) in enumerate(splits, start=1):
+        x_tr = x.iloc[tr_idx].copy()
+        y_tr = y.iloc[tr_idx].copy()
+        x_val = x.iloc[val_idx].copy()
+        y_val = y.iloc[val_idx].copy()
+
+        x_tr, x_val, y_tr, y_val = apply_actions_to_split(
+            x_tr, x_val, y_tr, y_val, target, actions
+        )
+        if y_tr.nunique() < 2:
+            continue
+
+        x_tr, y_tr = _resample_training_rows(
+            x_tr, y_tr, sampling, seed + fold_num
+        )
+        x_tr = _sklearn_features(x_tr)
+        x_val = _sklearn_features(x_val)
+
+        if model_type == "hist_gradient_boosting":
+            fold_pipe = _build_hgb_pipeline(
+                x_tr, class_weight=class_weight, seed=seed + fold_num
+            )
+        else:
+            fold_pipe = _build_pipeline(
+                x_tr, class_weight=class_weight, seed=seed + fold_num
+            )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", ConvergenceWarning)
+            fold_pipe.fit(x_tr, y_tr)
+        if any(issubclass(item.category, ConvergenceWarning) for item in caught):
+            warn_msg = "The model reached its iteration limit in cross-validation folds."
+            if warn_msg not in training_warnings:
+                training_warnings.append(warn_msg)
+
+        preds = fold_pipe.predict(x_val)
+        probs = fold_pipe.predict_proba(x_val)
+        model_classes = list(fold_pipe.named_steps["model"].classes_)
+
+        for cls_i, cls_val in enumerate(model_classes):
+            if cls_val in unique_classes:
+                target_cls_idx = unique_classes.index(cls_val)
+                oof_probs[val_idx, target_cls_idx] = probs[:, cls_i]
+
+        oof_preds[val_idx] = preds
+
+        f_acc = float(accuracy_score(y_val, preds))
+        f_macro_f1 = float(f1_score(y_val, preds, average="macro", zero_division=0))
+        f_weighted_f1 = float(f1_score(y_val, preds, average="weighted", zero_division=0))
+        f_macro_p = float(precision_score(y_val, preds, average="macro", zero_division=0))
+        f_macro_r = float(recall_score(y_val, preds, average="macro", zero_division=0))
+        f_roc_auc = None
+        f_ap = None
+
+        if is_binary and pos_class in [str(c) for c in model_classes]:
+            pos_idx = [str(c) for c in model_classes].index(pos_class)
+            val_bin = (y_val.astype(str) == pos_class).astype(int)
+            if val_bin.sum() > 0 and (1 - val_bin).sum() > 0:
+                try:
+                    f_roc_auc = float(roc_auc_score(val_bin, probs[:, pos_idx]))
+                    f_ap = float(average_precision_score(val_bin, probs[:, pos_idx]))
+                except Exception:
+                    pass
+
+        fold_metrics.append({
+            "fold": fold_num,
+            "train_rows": int(len(x_tr)),
+            "val_rows": int(len(x_val)),
+            "accuracy": f_acc,
+            "macro_f1": f_macro_f1,
+            "macro_precision": f_macro_p,
+            "macro_recall": f_macro_r,
+            "weighted_f1": f_weighted_f1,
+            "roc_auc": f_roc_auc,
+            "average_precision": f_ap,
+        })
+
+    accs = [m["accuracy"] for m in fold_metrics]
+    f1s = [m["macro_f1"] for m in fold_metrics]
+    precs = [m["macro_precision"] for m in fold_metrics]
+    recs = [m["macro_recall"] for m in fold_metrics]
+    wt_f1s = [m["weighted_f1"] for m in fold_metrics]
+    rocs = [m["roc_auc"] for m in fold_metrics if m["roc_auc"] is not None]
+    aps = [m["average_precision"] for m in fold_metrics if m["average_precision"] is not None]
+
+    cv_summary = {
+        "folds": actual_folds,
+        "accuracy_mean": float(np.mean(accs)),
+        "accuracy_std": float(np.std(accs)),
+        "macro_f1_mean": float(np.mean(f1s)),
+        "macro_f1_std": float(np.std(f1s)),
+        "macro_precision_mean": float(np.mean(precs)),
+        "macro_precision_std": float(np.std(precs)),
+        "macro_recall_mean": float(np.mean(recs)),
+        "macro_recall_std": float(np.std(recs)),
+        "weighted_f1_mean": float(np.mean(wt_f1s)),
+        "weighted_f1_std": float(np.std(wt_f1s)),
+        "roc_auc_mean": float(np.mean(rocs)) if rocs else None,
+        "roc_auc_std": float(np.std(rocs)) if rocs else None,
+        "average_precision_mean": float(np.mean(aps)) if aps else None,
+        "average_precision_std": float(np.std(aps)) if aps else None,
+    }
+
+    # Train a final pipeline on the full dataset so the user has an exportable model
+    x_full_clean, _, y_full_clean, _ = apply_actions_to_split(
+        x, x.iloc[:0], y, y.iloc[:0], target, actions
+    )
+    x_full_clean, y_full_clean = _resample_training_rows(
+        x_full_clean, y_full_clean, sampling, seed
+    )
+    x_full_clean_features = _sklearn_features(x_full_clean)
+    if model_type == "hist_gradient_boosting":
+        final_pipeline = _build_hgb_pipeline(
+            x_full_clean_features, class_weight=class_weight, seed=seed
+        )
+    else:
+        final_pipeline = _build_pipeline(
+            x_full_clean_features, class_weight=class_weight, seed=seed
+        )
+    final_pipeline.fit(x_full_clean_features, y_full_clean)
+
+    relevance = _feature_relevance(
+        final_pipeline,
+        x.columns.tolist(),
+        x_eval=x_full_clean_features,
+        y_eval=y_full_clean,
+        seed=seed,
+    )
+
+    valid_oof = [i for i, p in enumerate(oof_preds) if p is not None]
+    y_oof = y.iloc[valid_oof]
+    p_oof = oof_preds[valid_oof]
+    probs_oof = oof_probs[valid_oof]
+
+    labels = pd.unique(
+        pd.concat([y_oof.reset_index(drop=True), pd.Series(p_oof)], ignore_index=True)
+    ).tolist()
+
+    metrics: dict[str, Any] = {
+        "accuracy": cv_summary["accuracy_mean"],
+        "macro_f1": cv_summary["macro_f1_mean"],
+        "macro_precision": cv_summary["macro_precision_mean"],
+        "macro_recall": cv_summary["macro_recall_mean"],
+        "weighted_precision": float(precision_score(y_oof, p_oof, average="weighted", zero_division=0)),
+        "weighted_recall": float(recall_score(y_oof, p_oof, average="weighted", zero_division=0)),
+        "weighted_f1": cv_summary["weighted_f1_mean"],
+        "confusion_matrix": confusion_matrix(y_oof, p_oof, labels=labels).tolist(),
+        "labels": [str(l) for l in labels],
+        "roc_auc": cv_summary["roc_auc_mean"],
+        "roc_auc_positive_class": pos_class,
+        "average_precision": cv_summary["average_precision_mean"],
+        "positive_class": pos_class,
+        "per_class_metrics": [],
+    }
+
+    model_labels = final_pipeline.named_steps["model"].classes_
+    class_precisions = precision_score(
+        y_oof, p_oof, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_recalls = recall_score(
+        y_oof, p_oof, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_f1s = f1_score(
+        y_oof, p_oof, labels=list(model_labels), average=None, zero_division=0
+    )
+    class_supports = [int((y_oof == cls).sum()) for cls in model_labels]
+    for cls, prec, rec, f1_val, sup in zip(
+        model_labels, class_precisions, class_recalls, class_f1s, class_supports
+    ):
+        metrics["per_class_metrics"].append({
+            "class": str(cls),
+            "precision": float(prec),
+            "recall": float(rec),
+            "f1": float(f1_val),
+            "support": sup,
+        })
+
+    # Fold mean ± std is the stability signal for CV. The paired bootstrap
+    # check is reserved for the hold-out path, where two runs share one test set.
+    return {
+        "metrics": metrics,
+        "pipeline": final_pipeline,
+        "target": target,
+        "seed": seed,
+        "test_size": 1.0 / actual_folds,
+        "class_weight": class_weight,
+        "sampling": sampling,
+        "positive_class": positive_class,
+        "model_type": model_type,
+        "train_rows_before": int(len(usable)),
+        "train_rows_after": int(len(x_full_clean)),
+        "train_rows_after_cleaning": int(len(x_full_clean)),
+        "train_rows_after_sampling": int(len(x_full_clean)),
+        "test_rows": int(len(y_oof)),
+        "test_indices": usable.index[valid_oof].tolist(),
+        "test_probabilities": probs_oof.tolist(),
+        "test_prob_labels": [str(c) for c in unique_classes],
+        "y_test": y_oof.tolist(),
+        "missing_target_rows_excluded": missing_target_rows,
+        "columns": x_full_clean.columns.tolist(),
+        "row_count": int(len(usable)),
+        "column_count": int(len(x_full_clean.columns)),
+        "feature_relevance": relevance,
+        "warnings": training_warnings,
+        "unseen_test_labels": [],
+        "bootstrap_metrics": None,
+        "cv_folds": actual_folds,
+        "cv_summary": cv_summary,
+        "cv_fold_metrics": fold_metrics,
+        "slice_diagnostics": _slice_diagnostics(
+            x.iloc[valid_oof],
+            y_oof,
+            p_oof,
+        ),
+    }
+
+
 def train_model(
     df: pd.DataFrame,
     target: str,
@@ -650,6 +942,7 @@ def train_model(
     actions: list[dict[str, Any]] | None = None,
     positive_class: str | None = None,
     model_type: ModelType = "logistic_regression",
+    cv_folds: int | None = None,
 ) -> dict[str, Any]:
     """Split, preprocess, train, and evaluate a classification model.
 
@@ -668,6 +961,19 @@ def train_model(
         prepared[target] = df[target].copy()
     actions = actions or []
     _validate(prepared, target)
+
+    if cv_folds is not None and cv_folds >= 2:
+        return _train_model_cv(
+            prepared,
+            target,
+            cv_folds=cv_folds,
+            seed=seed,
+            class_weight=class_weight,
+            sampling=sampling,
+            actions=actions,
+            positive_class=positive_class,
+            model_type=model_type,
+        )
 
     missing_target_rows = int(prepared[target].isna().sum())
     usable = prepared.dropna(subset=[target]).copy()
@@ -856,9 +1162,9 @@ def train_model(
         "test_prob_labels": test_prob_labels,
         "y_test": y_test.tolist(),
         "missing_target_rows_excluded": missing_target_rows,
-        "columns": x.columns.tolist(),
+        "columns": x_train.columns.tolist(),
         "row_count": int(len(usable)),
-        "column_count": int(len(x.columns)),
+        "column_count": int(len(x_train.columns)),
         "feature_relevance": relevance,
         "warnings": training_warnings,
         "unseen_test_labels": unseen_test_labels,

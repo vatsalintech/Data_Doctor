@@ -12,6 +12,10 @@ from data_doctor.contracts import (
     infer_contract,
     validate_contract,
 )
+from data_doctor.code_export import (
+    export_model_bytes,
+    generate_cleaning_code,
+)
 from data_doctor.detectors import Finding
 from data_doctor.report import (
     build_health_report,
@@ -97,8 +101,8 @@ def _render_training_controls(
             "**Logistic Regression** – fast linear model, good baseline. "
             "Feature relevance uses normalised coefficient weights.\n\n"
             "**Hist Gradient Boosting** – tree-based model that natively "
-            "handles missing values. Feature relevance uses mean absolute "
-            "gain (feature_importances_)."
+            "handles missing values. Feature relevance uses permutation "
+            "importance (mean accuracy drop when a column is shuffled)."
         ),
     )
     model_type = (
@@ -135,6 +139,28 @@ def _render_training_controls(
         )
         st.session_state.positive_class = positive_class
 
+    eval_choice = st.selectbox(
+        "Evaluation strategy",
+        [
+            "Hold-out split (80/20)",
+            "5-Fold Cross-Validation",
+            "10-Fold Cross-Validation",
+        ],
+        help=(
+            "**Hold-out split (80/20)**: One train/test split with a 400-repetition "
+            "bootstrap check that tells you whether a score change is larger than "
+            "ordinary test-set wobble.\n\n"
+            "**K-Fold Cross-Validation**: Trains on each fold, reports Mean ± Std "
+            "across folds, and keeps out-of-fold diagnostics. Stability comes from "
+            "the fold spread, not the bootstrap check."
+        ),
+    )
+    cv_folds = (
+        5
+        if eval_choice == "5-Fold Cross-Validation"
+        else (10 if eval_choice == "10-Fold Cross-Validation" else None)
+    )
+
     class_weight = (
         "balanced" if strategy == 'class_weight="balanced"' else None
     )
@@ -161,6 +187,7 @@ def _render_training_controls(
             sampling,
             positive_class=positive_class,
             model_type=model_type,
+            cv_folds=cv_folds,
         )
 
     result_available = st.session_state.latest_training_result is not None
@@ -177,6 +204,28 @@ def _render_training_controls(
         width="stretch",
     ):
         render_feature_relevance()
+    if result_available and st.session_state.latest_training_result:
+        pipeline = st.session_state.latest_training_result.get("pipeline")
+        model_type = st.session_state.latest_training_result.get(
+            "model_type", "model"
+        )
+        if pipeline is not None:
+            try:
+                model_data = export_model_bytes(pipeline)
+                st.download_button(
+                    "Download model (.joblib)",
+                    data=model_data,
+                    file_name=f"datadoctor_{model_type}.joblib",
+                    mime="application/octet-stream",
+                    width="stretch",
+                    help=(
+                        "Download the trained scikit-learn pipeline (.joblib) "
+                        "for inference and production deployment."
+                    ),
+                    key="control_panel_download_model_button",
+                )
+            except Exception as err:
+                st.caption(f"Could not serialize model: {err}")
     if not st.session_state.run_history:
         st.caption(
             "Train once to unlock the training result and feature relevance."
@@ -195,6 +244,7 @@ def _train(
     sampling: str | None,
     positive_class: str | None = None,
     model_type: str = "logistic_regression",
+    cv_folds: int | None = None,
 ) -> None:
     try:
         with st.spinner("Training…"):
@@ -206,6 +256,7 @@ def _train(
                 actions=st.session_state.action_log,
                 positive_class=positive_class,
                 model_type=model_type,
+                cv_folds=cv_folds,
             )
         record = build_run_record(
             result,
@@ -262,6 +313,23 @@ def _render_working_data_controls(
         mime="text/csv",
         width="stretch",
     )
+    cleaning_script = generate_cleaning_code(
+        st.session_state.action_log,
+        selected_target,
+        source_name=st.session_state.get("source_key", "dataset.csv"),
+    )
+    st.download_button(
+        "Download cleaning code (.py)",
+        data=cleaning_script,
+        file_name="datadoctor_cleaning.py",
+        mime="text/x-python",
+        width="stretch",
+        help=(
+            "Download standalone Python code that reproduces all data "
+            "cleaning steps applied up to this point."
+        ),
+        key="download_cleaning_code_button",
+    )
     report = build_health_report(
         st.session_state.working_df,
         selected_target,
@@ -302,6 +370,8 @@ def _render_working_data_controls(
                 hide_index=True,
                 width="stretch",
             )
+            st.caption("Generated Python cleaning script:")
+            st.code(cleaning_script, language="python")
 
 
 def _render_dataset_comparison(contract: dict) -> None:

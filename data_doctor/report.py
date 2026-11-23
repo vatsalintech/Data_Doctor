@@ -85,6 +85,9 @@ def build_run_record(
         ),
         "test_indices": training_result.get("test_indices", []),
         "bootstrap_metrics": training_result.get("bootstrap_metrics"),
+        "cv_folds": training_result.get("cv_folds"),
+        "cv_summary": training_result.get("cv_summary"),
+        "cv_fold_metrics": training_result.get("cv_fold_metrics", []),
     }
 
 

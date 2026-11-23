@@ -16,6 +16,7 @@ from sklearn.metrics import (
     recall_score,
 )
 
+from data_doctor.code_export import export_model_bytes
 from data_doctor.report import compare_runs
 from streamlit_ui.state import apply_working_action
 
@@ -43,7 +44,31 @@ def render_training_results() -> None:
         if model_type == "hist_gradient_boosting"
         else "Logistic Regression"
     )
-    st.caption(f"Model: **{model_label}**")
+    cv_summary = (result or {}).get("cv_summary") or (latest or {}).get("cv_summary")
+    cv_folds = (result or {}).get("cv_folds") or (latest or {}).get("cv_folds")
+
+    col_cap, col_dl = st.columns([1.5, 1])
+    with col_cap:
+        eval_label = (
+            f" • **{cv_folds}-Fold CV** (OOF evaluation)"
+            if cv_folds
+            else " • **Hold-out split (80/20)**"
+        )
+        st.caption(f"Model: **{model_label}**{eval_label}")
+    with col_dl:
+        if result and result.get("pipeline"):
+            try:
+                st.download_button(
+                    "Download model (.joblib)",
+                    data=export_model_bytes(result["pipeline"]),
+                    file_name=f"datadoctor_{model_type}.joblib",
+                    mime="application/octet-stream",
+                    help="Download the trained scikit-learn pipeline (.joblib).",
+                    key="dialog_download_model_button",
+                    width="stretch",
+                )
+            except Exception:
+                pass
 
     # ── Threshold control (binary only) ──────────────────────────────────────
     threshold = 0.5
@@ -101,14 +126,40 @@ def render_training_results() -> None:
     # ── Core metric tiles ─────────────────────────────────────────────────────
     n_cols = 4 if is_binary else 2
     metric_cols = st.columns(n_cols)
+
+    acc_label = (
+        f"{cv_summary['accuracy_mean']:.3f} ± {cv_summary['accuracy_std']:.3f}"
+        if cv_summary and abs(threshold - 0.5) < 1e-4
+        else f"{threshold_accuracy:.3f}"
+    )
+    macro_f1_label = (
+        f"{cv_summary['macro_f1_mean']:.3f} ± {cv_summary['macro_f1_std']:.3f}"
+        if cv_summary
+        else f"{metrics.get('macro_f1', 0):.3f}"
+    )
+    roc_label = (
+        f"{cv_summary['roc_auc_mean']:.3f} ± {cv_summary['roc_auc_std']:.3f}"
+        if cv_summary and cv_summary.get("roc_auc_mean") is not None
+        else (f"{metrics['roc_auc']:.3f}" if metrics.get("roc_auc") is not None else "—")
+    )
+    ap_label = (
+        f"{cv_summary['average_precision_mean']:.3f} ± {cv_summary['average_precision_std']:.3f}"
+        if cv_summary and cv_summary.get("average_precision_mean") is not None
+        else (
+            f"{metrics['average_precision']:.3f}"
+            if metrics.get("average_precision") is not None
+            else "—"
+        )
+    )
+
     metric_cols[0].metric(
-        "Accuracy",
-        f"{threshold_accuracy:.3f}",
-        help="Fraction of correctly classified test examples.",
+        "Accuracy" + (" (CV Mean)" if cv_summary else ""),
+        acc_label,
+        help="Fraction of correctly classified test examples (Mean ± Std Dev across folds when using CV).",
     )
     metric_cols[1].metric(
-        "Macro F1",
-        f"{metrics.get('macro_f1', 0):.3f}",
+        "Macro F1" + (" (CV Mean)" if cv_summary else ""),
+        macro_f1_label,
         help=(
             "Average F1 across classes, treating each class equally. "
             "More informative than accuracy when classes are imbalanced."
@@ -116,15 +167,13 @@ def render_training_results() -> None:
     )
     if is_binary:
         metric_cols[2].metric(
-            "ROC-AUC",
-            f"{metrics['roc_auc']:.3f}" if metrics.get("roc_auc") is not None else "—",
+            "ROC-AUC" + (" (CV Mean)" if cv_summary else ""),
+            roc_label,
             help="Area under the ROC curve. 1.0 = perfect, 0.5 = random.",
         )
         metric_cols[3].metric(
-            "Avg Precision (PR-AUC)",
-            f"{metrics['average_precision']:.3f}"
-            if metrics.get("average_precision") is not None
-            else "—",
+            "Avg Precision (PR-AUC)" + (" (CV Mean)" if cv_summary else ""),
+            ap_label,
             help=(
                 "Average Precision summarises the Precision-Recall curve. "
                 "Particularly useful when the positive class is rare."
@@ -135,6 +184,40 @@ def render_training_results() -> None:
             f"(support: {sum(1 for v in (result or {}).get('y_test', []) if str(v) == pos_class):,} "
             f"of {len((result or {}).get('y_test', [])):,} test rows)"
         )
+
+    cv_fold_metrics = (result or {}).get("cv_fold_metrics") or (latest or {}).get("cv_fold_metrics")
+    if cv_fold_metrics:
+        with st.expander(f"Per-fold scores ({len(cv_fold_metrics)} folds)", expanded=False):
+            cv_df = pd.DataFrame(cv_fold_metrics).rename(
+                columns={
+                    "fold": "Fold",
+                    "train_rows": "Train Rows",
+                    "val_rows": "Val Rows",
+                    "accuracy": "Accuracy",
+                    "macro_f1": "Macro F1",
+                    "macro_precision": "Macro Prec",
+                    "macro_recall": "Macro Rec",
+                    "weighted_f1": "Weighted F1",
+                    "roc_auc": "ROC-AUC",
+                    "average_precision": "PR-AUC",
+                }
+            )
+            format_rules = {
+                "Accuracy": "{:.3f}",
+                "Macro F1": "{:.3f}",
+                "Macro Prec": "{:.3f}",
+                "Macro Rec": "{:.3f}",
+                "Weighted F1": "{:.3f}",
+            }
+            if "ROC-AUC" in cv_df.columns:
+                format_rules["ROC-AUC"] = "{:.3f}"
+            if "PR-AUC" in cv_df.columns:
+                format_rules["PR-AUC"] = "{:.3f}"
+            st.dataframe(
+                cv_df.style.format(format_rules, na_rep="—"),
+                hide_index=True,
+                width="stretch",
+            )
 
     for message in latest.get("warnings", []):
         st.warning(message)
@@ -222,6 +305,7 @@ def render_training_results() -> None:
     visible = [
         "run_number",
         "model_type",
+        "cv_folds",
         "accuracy",
         "precision",
         "recall",
@@ -236,6 +320,8 @@ def render_training_results() -> None:
     processed_history = []
     for item in history:
         row = dict(item)
+        folds_val = row.get("cv_folds")
+        row["cv_folds"] = f"{folds_val}-Fold" if folds_val else "Hold-out 80/20"
         if "precision" not in row or row["precision"] is None:
             pc_list = row.get("per_class_metrics") or []
             pc_target = row.get("positive_class") or row.get("roc_auc_positive_class")

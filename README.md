@@ -14,15 +14,15 @@
 
 ## 🎯 What is DataDoctor
 
-DataDoctor is a **decision-support tool for data scientists**, not an automatic data cleaner.
+DataDoctor is a **decision-support tool for data scientists**, not an automatic data cleaner. It is scoped to **tabular classification** (a discrete target with at least two classes). Continuous regression targets are not supported.
 
 Most data cleaning tools fall into one of two extremes: passive static report generators (like Pandas Profiling) or dangerous black-box "auto-cleaners" that silently impute values, delete rows, and contaminate held-out test splits.
 
 DataDoctor takes a different approach. It **diagnoses your dataset using deterministic rules, surfaces every detected issue with a plain-language explanation, and waits for you to decide what to do.** You choose each action explicitly. Nothing is changed until you apply it.
 
-The core idea is to show you **how each cleaning decision actually affects model performance**. After every action you apply, you can re-train a Logistic Regression or HistGradientBoosting model in one click and see the exact change in Accuracy, Macro F1, ROC-AUC, and more — with a 400-repetition bootstrap confidence interval that tells you whether the change is real or just test-set noise.
+The core idea is to show you **whether each cleaning decision changed held-out model performance**. After you apply actions, you can re-train Logistic Regression or HistGradientBoostingClassifier and compare Accuracy, Macro F1, ROC-AUC, and more. On the hold-out path, a 400-repetition bootstrap confidence interval tells you whether the change is larger than ordinary test-set noise. A flat or slightly moving score is a valid result — many fills change very little on the demo files, and removing a leaked target copy often lowers the score on purpose.
 
-**What it is not:** DataDoctor does not auto-clean your data. It does not make changes without your approval. It does not build a production ML pipeline or perform hyperparameter tuning.
+**What it is not:** DataDoctor does not auto-clean your data. It does not make changes without your approval. It does not build a production ML pipeline, tune hyperparameters, or train regression models.
 
 ---
 
@@ -51,21 +51,28 @@ The core idea is to show you **how each cleaning decision actually affects model
    │  │ • Group-Aware Split    • Train-Only Fits         │  │
    │  │ • Bootstrap Range      • Feature Relevance       │  │
    │  │ • Logistic Regression  • HistGradientBoosting    │  │
+   │  │ • Hold-out 80/20       • Stratified K-Fold CV    │  │
    │  └──────────────────────────────────────────────────┘  │
    └────────────────────────────────────────────────────────┘
               │                               │
               ▼                               ▼
        Cleaned Working CSV            Portable JSON Contract
         (Always Exportable)            & PSI Drift Monitor
+              │                               │
+              ▼                               ▼
+      Trained Model Pipeline         Python Cleaning Script
+      (.joblib scikit-learn)         (.py standalone code)
 ```
 
 ### 1. Honest ML Evaluation Rules
-- **Split First, Treat Second**: Transformers (scalers, encoders, median imputers) and row-level cleaning operations (outlier clipping, row drops, balancing) are learned strictly on the **training split**, leaving the test split clean and unpolluted.
-- **Group-Aware Splitting**: Identical feature rows are automatically constrained to one side of the split to guarantee zero duplicate leakage between train and test.
-- **Paired Bootstrap Check (400 Repetitions)**: Resamples the same held-out rows 400 times and shows a 95% range for the change in Accuracy and Macro F1. When that range includes zero, the app calls the change normal test-set wobble.
+- **Split First, Treat Second**: Transformers (scalers, encoders, median imputers) and row-level cleaning operations (outlier clipping, row drops, balancing) are learned strictly on the **training split**, leaving the test / validation split unpolluted by fit-time statistics.
+- **Group-Aware Splitting**: Identical feature rows are kept on one side of the split so duplicate rows cannot leak across train and test.
+- **Hold-out split (80/20)**: Default evaluation. Fixed seed, same rows every Train click for the same file and target.
+- **Stratified K-Fold Cross-Validation (5-Fold / 10-Fold)**: Group-aware stratified folds, Mean ± Std across folds, and out-of-fold diagnostics. The downloadable model is then fit on the full cleaned training table.
+- **Paired Bootstrap Check (400 Repetitions)**: On the hold-out path only, resamples the same held-out rows 400 times and shows a 95% range for the change in Accuracy and Macro F1. When that range includes zero, the app calls the change normal test-set wobble. K-fold uses fold Mean ± Std instead.
 
 ### 2. Two Training Models — Side by Side
-Both models produce the same full set of metrics so you can compare how each responds to the same data cleaning decisions.
+Both models produce the same metric keys so you can compare how each responds to the same cleaning decisions.
 
 | | Logistic Regression | HistGradientBoosting |
 |:---|:---|:---|
@@ -73,14 +80,14 @@ Both models produce the same full set of metrics so you can compare how each res
 | **Missing values** | Median / mode imputed before training | Handled natively — no imputation needed |
 | **Categoricals** | OneHotEncoded (top 50 categories) | OrdinalEncoded (top 50 categories) |
 | **Feature relevance** | Normalised absolute coefficient weights | Permutation feature importance (mean accuracy drop on held-out samples) |
-| **Best for** | Understanding linear relationships, fast baseline | Non-linear patterns, robust to outliers |
+| **Best for** | Understanding linear relationships, fast baseline | Non-linear patterns, native missing handling |
 
 ### 3. 7 Deterministic Anomaly Detectors
-- **Missing Values**: Quantifies missing rates per column and suggests median/mode imputation, constant filling, or column pruning.
+- **Missing Values**: Quantifies missing rates per column (including common text stand-ins) and suggests median/mode imputation, constant filling, or column pruning.
 - **Exact & Conflicting Duplicates**: Identifies identical records and highlights conflicting-label rows for manual review.
 - **Outliers (IQR Fences)**: Flags numerical outliers and suggests bounding/capping before dropping rows.
 - **Class Imbalance**: Computes class ratios and provides training-only interventions (`class_weight="balanced"`, random oversampling, random undersampling).
-- **Suspicious Labels**: Detects rare classes, near-constant labels, and missing-like strings (`unknown`, `???`, `-1`, blanks) with targeted recoding tools.
+- **Suspicious Labels**: Detects rare classes, near-constant labels, and missing-like strings (`unknown`, `???`, blanks) with targeted recoding tools. Spelling variants of the same answer are flagged for manual review, not auto-merged.
 - **Target Leakage & ID Columns**: Flags columns identical to the target, high-lift target proxies, and high-cardinality IDs.
 - **Features Stored as Text**: Safely parses numeric/datetime values mistakenly encoded as strings and provides explicit 1-click conversions.
 
@@ -88,11 +95,11 @@ Both models produce the same full set of metrics so you can compare how each res
 Every model run reports:
 - Accuracy, Macro F1, Weighted F1, Macro Precision, Macro Recall
 - ROC-AUC and Average Precision (PR-AUC) for binary problems
-- Threshold slider for binary classification — adjust the decision boundary live
+- Threshold slider for binary classification — adjust the decision boundary live (does not refit)
 - Per-class Precision, Recall, F1, and Support
 - Confusion matrix
 - Slice diagnostics — per-group accuracy and F1 for categorical columns
-- Run history table comparing all previous runs
+- Run history table comparing previous runs
 
 ### 5. Dataset Contracts and Drift Checks
 - Exports a JSON contract capturing column types, missingness ceilings, and category bounds.
@@ -103,6 +110,11 @@ Every model run reports:
 - **Strictly Separated**: Rules and math diagnose and clean data; the LLM strictly explains domain context and never modifies data.
 - **Offline fallback**: With no API key, the app uses a built-in mock and does not call Gemini. Diagnosis and training keep working.
 
+### 7. Exportable Artifacts & Code Generation
+- **Trained Model File (`.joblib`)**: Download the fitted scikit-learn Pipeline (preprocessing + model) from the controls or training result dialog.
+- **Reproducible Python Script (`.py`)**: Download standalone Python that replays the cleaning steps applied so far (`python datadoctor_cleaning.py input.csv output.csv`).
+- **Cleaned Data & Audit Logs**: Export the working CSV, schema contract JSON, and health audit report JSON at any time.
+
 ---
 
 ## 🛠️ Tech Stack
@@ -110,7 +122,7 @@ Every model run reports:
 | Layer | Technologies |
 | :--- | :--- |
 | **Language** | Python 3.12 |
-| **Core Libraries** | pandas, NumPy, scikit-learn |
+| **Core Libraries** | pandas, NumPy, scikit-learn, joblib |
 | **Frontend / UI** | Streamlit, Altair, HTML/CSS |
 | **LLM Semantic Layer** | Google Gemini API via `requests`, Pydantic v2 |
 | **Testing** | pytest, Streamlit AppTest framework |
@@ -171,9 +183,18 @@ python data/build_messy_datasets.py
 
 ---
 
+## ☁️ Deployment (Streamlit Community Cloud)
+
+1. Deploy from [share.streamlit.io](https://share.streamlit.io/) with main file `app.py` and Python 3.12 from `runtime.txt`.
+2. Optionally add `GEMINI_API_KEY` and `GEMINI_MODEL` under **Settings → Secrets**.
+
+The 10 MB upload cap, 50,000-row ceiling, and 8-step undo history exist because the free tier has about 1 GB of RAM. They are hosting limits, not limits of the diagnosis or training logic. Datasets under about **20,000 rows** stay responsive on that free tier.
+
+---
+
 ## 🧪 Testing & Verification
 
-Tests cover detectors, treatments, the bootstrap check, contracts, Streamlit interactions, and the AI fallback. Run them locally:
+Tests cover detectors, treatments, hold-out and K-fold training, the bootstrap check, contracts, exports, Streamlit interactions, and the AI fallback. Run them locally:
 
 ```bash
 pytest
@@ -193,6 +214,7 @@ Data_Doctor/
 │   ├── Messy/                        # Generated messy demo CSVs & issue manifest
 │   └── build_messy_datasets.py       # Deterministic demo generator
 ├── data_doctor/
+│   ├── code_export.py                # Model serialization (.joblib) & Python code generator
 │   ├── contracts.py                  # Inferred dataset contracts & PSI drift monitoring
 │   ├── detectors.py                  # 7 deterministic tabular issue detectors
 │   ├── model_training.py             # Leakage-safe training pipeline (LR & HGB)

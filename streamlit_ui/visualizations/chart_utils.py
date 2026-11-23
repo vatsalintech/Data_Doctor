@@ -2,9 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Any
-
-import altair as alt
 import pandas as pd
 
 
@@ -25,30 +22,6 @@ PALETTE_CATEGORICAL = [
 MISSING_COLOUR = "#9ca3af"
 COMPACT_HEIGHT = 120
 DETAIL_HEIGHT = 220
-
-
-def base_chart_config() -> dict[str, Any]:
-    """Return Altair chart-level config for a clean DataDoctor look."""
-    return {
-        "view": {"stroke": "transparent"},
-        "axis": {
-            "labelFontSize": 11,
-            "titleFontSize": 11,
-            "grid": True,
-            "gridOpacity": 0.15,
-            "domainOpacity": 0.3,
-            "tickOpacity": 0.3,
-        },
-        "legend": {"labelFontSize": 11, "titleFontSize": 11},
-    }
-
-
-def apply_config(chart: alt.Chart) -> alt.Chart:
-    return chart.configure(**base_chart_config())
-
-
-def missing_fraction(series: pd.Series) -> float:
-    return float(series.isna().mean())
 
 
 def non_missing(series: pd.Series) -> pd.Series:
