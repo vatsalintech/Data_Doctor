@@ -223,8 +223,12 @@ Data_Doctor/
 │   └── ai_understanding/             # Decoupled Gemini semantic understanding layer
 │       ├── ai_client.py              # Gemini client with MockAIClient fallback
 │       ├── dataset_analyzer.py       # Domain purpose & dataset-level interpretation
+│       ├── dataset_context.py        # Shared dataset context passed to AI calls
 │       ├── column_analyzer.py        # Column-level semantic classification
+│       ├── sample_generator.py       # Representative value sampling for prompts
+│       ├── prompts.py                # Prompt templates for Gemini calls
 │       ├── response_schema.py        # Pydantic v2 structured schemas
+│       ├── result_validator.py       # Validates & normalises AI responses
 │       └── cache_manager.py          # Response caching to prevent duplicate API calls
 ├── scripts/
 │   └── diagnose_cli.py               # Command-line inspection tool for tabular datasets
@@ -233,9 +237,23 @@ Data_Doctor/
 │   ├── data_sources.py               # File uploader & demo dataset loaders
 │   ├── state.py                      # Session state, undo/redo stack
 │   ├── actions.py                    # UI action options & inputs
+│   ├── config.py                     # App-wide UI configuration constants
 │   ├── styles.py                     # Page theme and visual styling
-│   ├── visualizations/               # Altair histograms, bars, & outlier bins
-│   └── components/                   # Cards, modals, grids, & control panels
+│   ├── visualizations/               # Altair chart modules
+│   │   ├── categorical_charts.py     # Bar & frequency charts for categorical columns
+│   │   ├── numeric_charts.py         # Histograms & outlier bin charts
+│   │   ├── target_analysis.py        # Target distribution & class-balance visuals
+│   │   └── chart_utils.py            # Shared Altair helpers & colour scales
+│   └── components/                   # Reusable UI components
+│       ├── controls.py               # Sidebar controls & global action buttons
+│       ├── columns.py                # Column list & summary cards
+│       ├── column_detail.py          # Per-column detail panel
+│       ├── column_actions.py         # Action inputs for individual columns
+│       ├── column_charts.py          # Inline column-level chart rendering
+│       ├── dataset_issues.py         # Dataset-level issue cards & interventions
+│       ├── ai_understanding.py       # AI insights panel & rendering
+│       ├── dialogs.py                # Modal dialogs (training results, exports)
+│       └── common.py                 # Shared component helpers & micro-widgets
 └── tests/                            # pytest suite
 ```
 
