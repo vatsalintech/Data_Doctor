@@ -7,6 +7,7 @@ context limit blowouts on wide classification datasets.
 from __future__ import annotations
 
 import logging
+import time
 from typing import Callable
 from data_doctor.ai_understanding.ai_client import AIClient
 from data_doctor.ai_understanding.dataset_context import DatasetContext
@@ -23,7 +24,8 @@ from data_doctor.ai_understanding.result_validator import validate_column_batch
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_BATCH_SIZE = 5
+DEFAULT_BATCH_SIZE = 1
+DEFAULT_REQUEST_DELAY = 3.0
 
 
 def analyze_columns_batched(
@@ -32,11 +34,13 @@ def analyze_columns_batched(
     *,
     batch_size: int = DEFAULT_BATCH_SIZE,
     dataset_summary: str | None = None,
+    delay_seconds: float = DEFAULT_REQUEST_DELAY,
     progress_callback: Callable[[int, int], None] | None = None,
 ) -> dict[str, ColumnUnderstanding]:
-    """Analyze all columns in manageable batches.
+    """Analyze all columns in manageable, sequential batches.
 
-    Guarantees every column receives an entry even if a specific batch fails.
+    Guarantees that each request is fully completed and received before
+    pausing and sending the next request, preventing API gateway overloads.
     """
     results: dict[str, ColumnUnderstanding] = {}
     columns_to_analyze = list(context.column_names)
@@ -97,7 +101,11 @@ def analyze_columns_batched(
                     observations=[],
                 )
 
-    if progress_callback:
-        progress_callback(total_columns, total_columns)
+        if progress_callback:
+            progress_callback(len(results), total_columns)
+
+        # Only pause after successfully getting the response and if more batches remain
+        if batch_idx + 1 < len(batches) and delay_seconds > 0 and client.__class__.__name__ != "MockAIClient":
+            time.sleep(delay_seconds)
 
     return results

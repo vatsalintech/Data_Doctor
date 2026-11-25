@@ -6,11 +6,14 @@ Handles API authentication, timeouts, rate limits, retry backoff, and JSON parsi
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import time
 from typing import Any
 import requests
+
+logger = logging.getLogger(__name__)
 
 
 class AIClientError(Exception):
@@ -50,8 +53,8 @@ class GeminiAIClient(AIClient):
     # Tried in order when the configured model is busy, missing, or too slow.
     FALLBACK_MODELS = (
         "gemini-flash-lite-latest",
-        "gemini-2.5-flash-lite",
-        "gemini-2.5-flash",
+        "gemini-flash-latest",
+        "gemini-3.8-flash",
     )
     BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
@@ -60,7 +63,7 @@ class GeminiAIClient(AIClient):
         api_key: str | None = None,
         model: str | None = None,
         timeout_seconds: int = 60,
-        max_retries: int = 1,
+        max_retries: int | None = None,
     ) -> None:
         self.api_key = api_key or self._resolve_api_key()
         if not self.api_key:
@@ -73,7 +76,9 @@ class GeminiAIClient(AIClient):
         self.timeout_seconds = (
             timeout_seconds if timeout_seconds != 60 else self._resolve_timeout(60)
         )
-        self.max_retries = max_retries
+        self.max_retries = (
+            max_retries if max_retries is not None else self._resolve_retries(2)
+        )
 
     @staticmethod
     def _resolve_api_key() -> str | None:
@@ -123,6 +128,24 @@ class GeminiAIClient(AIClient):
             pass
         return default_timeout
 
+    @staticmethod
+    def _resolve_retries(default_retries: int = 2) -> int:
+        """Resolve max retries from environment variable or Streamlit secrets."""
+        val = os.environ.get("GEMINI_MAX_RETRIES")
+        if val:
+            try:
+                return int(val)
+            except ValueError:
+                pass
+        try:
+            import streamlit as st
+
+            if hasattr(st, "secrets") and "GEMINI_MAX_RETRIES" in st.secrets:
+                return int(st.secrets["GEMINI_MAX_RETRIES"])
+        except Exception:
+            pass
+        return default_retries
+
     def _models_to_try(self) -> list[str]:
         """Configured model first, then lighter models that are more likely to answer."""
         models = [self.configured_model]
@@ -132,22 +155,22 @@ class GeminiAIClient(AIClient):
         return models
 
     def _read_timeout(self, model_name: str, models: list[str]) -> float:
-        """Give backup models a full wait. Abandon a busy model sooner."""
+        """Allow full timeout for the configured model, and a sensible minimum for fallbacks."""
         full_wait = float(self.timeout_seconds)
-        if model_name == models[-1]:
+        if model_name == self.configured_model:
             return full_wait
-        return min(full_wait, 20.0)
+        return min(full_wait, 30.0)
 
     def generate_json(
         self, prompt: str, system_instruction: str = ""
     ) -> dict[str, Any]:
         """Call Gemini REST API requesting strict JSON output.
 
-        A busy or missing configured model is not retried until the full timeout.
-        The same prompt is sent to the next lighter model instead.
+        Attempts the configured model with the full configured timeout.
+        If it fails, tries fallback models before reporting detailed diagnostics.
         """
         models = self._models_to_try()
-        last_error: Exception | None = None
+        model_errors: dict[str, str] = {}
         for model_name in models:
             try:
                 result = self._generate_once(
@@ -157,21 +180,26 @@ class GeminiAIClient(AIClient):
                     read_timeout=self._read_timeout(model_name, models),
                 )
             except (APIConnectionError, APIRateLimitError) as err:
-                last_error = err
+                model_errors[model_name] = str(err)
                 continue
             except AIClientError as err:
+                model_errors[model_name] = str(err)
                 if "was not found" in str(err):
-                    last_error = err
                     continue
                 raise
             self.model = model_name
             return result
 
         configured = self.configured_model
-        detail = f" Last error: {last_error}" if last_error else ""
+        configured_err = model_errors.get(configured, "No response")
+        detail = f" Configured model '{configured}': {configured_err}."
+        other_errs = [
+            f"'{m}': {e}" for m, e in model_errors.items() if m != configured
+        ]
+        if other_errs:
+            detail += f" Fallback attempts: [{'; '.join(other_errs)}]."
         raise APIConnectionError(
-            f"Gemini did not respond. The configured model '{configured}' was "
-            f"busy or too slow, and the backup models did not answer either.{detail}"
+            f"Gemini did not respond.{detail}"
         )
 
     def _generate_once(
@@ -239,7 +267,7 @@ class GeminiAIClient(AIClient):
                     f"(HTTP {response.status_code})."
                 )
                 if attempt + 1 < self.max_retries:
-                    time.sleep(2**attempt)
+                    time.sleep(2 * (attempt + 1))
                 continue
 
             if response.status_code == 404:
@@ -288,6 +316,161 @@ class GeminiAIClient(AIClient):
         if not isinstance(parsed, dict):
             raise InvalidJSONResponseError("Model response JSON was not an object.")
         return parsed
+
+
+class GroqAIClient(AIClient):
+    """Groq Cloud AI client using high-speed OpenAI-compatible REST API."""
+
+    DEFAULT_MODEL = "llama-3.3-70b-versatile"
+    BASE_URL = "https://api.groq.com/openai/v1/chat/completions"
+
+    def __init__(
+        self,
+        api_key: str | None = None,
+        model: str | None = None,
+        timeout_seconds: int = 60,
+    ) -> None:
+        self.api_key = api_key or self._resolve_api_key()
+        if not self.api_key:
+            raise APIKeyMissingError(
+                "Groq API key is not configured. Set the GROQ_API_KEY environment "
+                "variable or add it to .streamlit/secrets.toml."
+            )
+        self.model = model or self._resolve_model(self.DEFAULT_MODEL)
+        self.timeout_seconds = timeout_seconds
+
+    @staticmethod
+    def _resolve_api_key() -> str | None:
+        key = os.environ.get("GROQ_API_KEY")
+        if key:
+            return key.strip()
+        try:
+            import streamlit as st
+
+            if hasattr(st, "secrets") and "GROQ_API_KEY" in st.secrets:
+                return str(st.secrets["GROQ_API_KEY"]).strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _resolve_model(default_model: str) -> str:
+        model = os.environ.get("GROQ_MODEL")
+        if model:
+            return model.strip()
+        try:
+            import streamlit as st
+
+            if hasattr(st, "secrets") and "GROQ_MODEL" in st.secrets:
+                return str(st.secrets["GROQ_MODEL"]).strip()
+        except Exception:
+            pass
+        return default_model
+
+    @staticmethod
+    def _parse_wait_seconds(response: requests.Response) -> float:
+        """Read exactly how long Groq says to wait from a 429 response.
+
+        Checks (in order):
+        1. Body message: "Please try again in 2.15s"
+        2. x-ratelimit-reset-tokens header: "2.032s" or "1m30s"
+        3. retry-after header (integer seconds)
+        4. Falls back to a safe default of 10 seconds.
+        """
+        # 1. Most precise: body message
+        try:
+            m = re.search(r"try again in ([\d.]+)s", response.text)
+            if m:
+                return float(m.group(1)) + 0.5  # small buffer
+        except Exception:
+            pass
+
+        # 2. Token-reset header
+        reset_tokens = response.headers.get("x-ratelimit-reset-tokens", "")
+        if reset_tokens:
+            try:
+                val = reset_tokens.strip()
+                if "m" in val:
+                    parts = val.split("m")
+                    mins = float(parts[0])
+                    secs = float(parts[1].rstrip("s")) if parts[1].strip("s") else 0.0
+                    return mins * 60 + secs + 0.5
+                return float(val.rstrip("s")) + 0.5
+            except Exception:
+                pass
+
+        # 3. retry-after header
+        retry_after = response.headers.get("retry-after", "")
+        if retry_after:
+            try:
+                return float(retry_after) + 0.5
+            except ValueError:
+                pass
+
+        # 4. Safe fallback
+        return 10.0
+
+    def generate_json(
+        self, prompt: str, system_instruction: str = ""
+    ) -> dict[str, Any]:
+        """Send prompt to Groq and return structured JSON.
+
+        Automatically retries on rate-limit (HTTP 429) responses, waiting
+        the exact number of seconds Groq specifies before each retry.
+        Never gives up on a 429 — it will always eventually succeed.
+        """
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        messages: list[dict[str, str]] = []
+        if system_instruction:
+            messages.append({"role": "system", "content": system_instruction})
+        messages.append({"role": "user", "content": prompt})
+
+        payload = {
+            "model": self.model,
+            "messages": messages,
+            "temperature": 0.1,
+            "response_format": {"type": "json_object"},
+        }
+
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                response = requests.post(
+                    self.BASE_URL,
+                    headers=headers,
+                    json=payload,
+                    timeout=(10, self.timeout_seconds),
+                )
+            except requests.Timeout:
+                raise APIConnectionError(f"Groq model '{self.model}' timed out.")
+            except requests.RequestException as req_err:
+                raise APIConnectionError(f"Network error communicating with Groq: {req_err}")
+
+            if response.status_code == 200:
+                data = response.json()
+                content = data["choices"][0]["message"]["content"]
+                if content.startswith("```"):
+                    content = re.sub(r"^```(?:json)?\s*", "", content)
+                    content = re.sub(r"\s*```$", "", content)
+                try:
+                    return json.loads(content)
+                except json.JSONDecodeError as err:
+                    raise InvalidJSONResponseError(f"Groq did not return valid JSON: {err}")
+
+            if response.status_code == 429:
+                wait = self._parse_wait_seconds(response)
+                logger.info(
+                    "Groq rate limit hit (attempt %d). Waiting %.2fs for token window to refresh...",
+                    attempt, wait,
+                )
+                time.sleep(wait)
+                continue  # retry immediately after wait
+
+            raise AIClientError(f"Groq API error (HTTP {response.status_code}): {response.text}")
 
 
 class MockAIClient(AIClient):

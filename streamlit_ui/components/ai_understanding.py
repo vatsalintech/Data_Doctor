@@ -44,12 +44,15 @@ def render_ai_understanding_section(
 
         engine = get_ai_engine()
         client = engine.get_client()
-        if hasattr(client, "model") and getattr(client, "model", None) and not getattr(client, "should_fail", None) and client.__class__.__name__ == "GeminiAIClient":
-            st.caption(f"🟢 **Live AI Connected:** Google Gemini (`{client.model}`)")
+        client_cls = client.__class__.__name__
+        if client_cls == "GroqAIClient":
+            st.caption(f"🟢 **Live AI Connected:** Groq (`{getattr(client, 'model', 'llama-3.3-70b-versatile')}`)")
+        elif client_cls == "GeminiAIClient":
+            st.caption(f"🟢 **Live AI Connected:** Google Gemini (`{getattr(client, 'model', 'gemini-flash-lite-latest')}`)")
         else:
             st.caption(
-                "🟡 **Offline Simulator Mode:** `GEMINI_API_KEY` not detected. "
-                "Add your key to `.streamlit/secrets.toml` or set `export GEMINI_API_KEY=...` to connect live AI."
+                "🟡 **Offline Simulator Mode:** Live API key (`GROQ_API_KEY` or `GEMINI_API_KEY`) not detected. "
+                "Add your key to `.streamlit/secrets.toml` or set environment variables to connect live AI."
             )
 
         st.markdown("---")

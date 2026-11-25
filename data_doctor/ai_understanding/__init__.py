@@ -15,6 +15,7 @@ from data_doctor.ai_understanding.ai_client import (
     AIClientError,
     APIKeyMissingError,
     GeminiAIClient,
+    GroqAIClient,
     MockAIClient,
 )
 from data_doctor.ai_understanding.cache_manager import (
@@ -52,6 +53,7 @@ __all__ = [
     "AIClientError",
     "APIKeyMissingError",
     "GeminiAIClient",
+    "GroqAIClient",
     "MockAIClient",
     "AICacheManager",
     "AIUnderstandingEngine",
@@ -88,14 +90,23 @@ class AIUnderstandingEngine:
     def get_client(self) -> AIClient:
         """Resolve the active AI client.
 
-        Tries GeminiAIClient with resolved API key; falls back to MockAIClient if key is missing.
+        Checks for Groq first (GROQ_API_KEY), then Gemini (GEMINI_API_KEY),
+        falling back to MockAIClient if neither key is configured.
         """
         if self._custom_client:
             return self._custom_client
+
+        # 1. Try Groq (high performance, free tier)
+        try:
+            return GroqAIClient()
+        except APIKeyMissingError:
+            pass
+
+        # 2. Try Gemini
         try:
             return GeminiAIClient()
         except APIKeyMissingError:
-            logger.info("GEMINI_API_KEY not found. Using MockAIClient.")
+            logger.info("Neither GROQ_API_KEY nor GEMINI_API_KEY found. Using MockAIClient.")
             return MockAIClient()
 
     def run_understanding(
@@ -132,6 +143,13 @@ class AIUnderstandingEngine:
 
         # 3. Analyze dataset-level understanding
         dataset_understanding = analyze_dataset(context, client)
+
+        # Pause after dataset overview so Groq's token-per-minute window
+        # has time to partially refresh before we start column requests.
+        import time as _time
+        is_groq = client.__class__.__name__ == "GroqAIClient"
+        if is_groq:
+            _time.sleep(5.0)
 
         # 4. Analyze column-level understanding in batches
         column_results = analyze_columns_batched(
