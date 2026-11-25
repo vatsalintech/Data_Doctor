@@ -12,6 +12,12 @@
 
 ---
 
+## 🎬 Demo
+
+https://github.com/user-attachments/assets/d4293a30-6e85-4d25-83d0-0a66ec734999
+
+---
+
 ## 🎯 What is DataDoctor
 
 DataDoctor is a **decision-support tool for data scientists**, not an automatic data cleaner. It is scoped to **tabular classification** (a discrete target with at least two classes). Continuous regression targets are not supported.
